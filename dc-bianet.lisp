@@ -139,24 +139,6 @@
         (append (neurons net) neurons))
   (index-neurons net))
 
-(defmethod drop-neuron-by-location (net layer index-in-layer)
-  (loop for neuron in (neurons net)
-     for index = (if (equal (layer neuron) layer) 0 -1)
-     then (if (equal (layer neuron) layer) (1+ index) index)
-     if (and (equal layer (layer neuron))
-             (equal index-in-layer index))
-
-     collect neuron
-
-  (for (layer index-in-layer) in list-of-locations
-     for neurons = (or (elt layers layer)
-                       (setf (elt layers layer)
-                             (remove-if-not 
-                              (lambda (n) (equal (layer n) layer))
-                              (neurons net))))
-     do (setf (
-       
-
 (defun make-neurons (count layer transfer-tag)
   (loop with transfer = (gethash transfer-tag *transfers*)
      for a from 1 to count collect
@@ -176,7 +158,7 @@
      do 
        (setf (name neuron) (format nil "~d-~d~a" 
                                    (layer neuron)
-                                   ;; The index of the neuron in its layer
+                                   ;; The length of 
                                    (length (elt layers (layer neuron)))
                                    (if (biased neuron) "b" ""))
              (layer-type neuron) (cond ((zerop (layer neuron)) :input)
