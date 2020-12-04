@@ -96,7 +96,6 @@
                                         :derivative))
    (output :accessor output :type real :initform 0.0)
    (err :accessor err :type real :initform 0.0)
-   (firewave :accessor firewave :type integer :initform 0)
    (x-coor :accessor x-coor :type real :initform 0.0)
    (y-coor :accessor y-coor :type real :initform 0.0)
    (z-coor :accessor z-coor :type real :initform 0.0)
