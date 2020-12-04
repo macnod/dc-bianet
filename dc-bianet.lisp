@@ -40,26 +40,13 @@
 (defun relu-leaky-derivative (x)
   (if (<= x 0.0) 0.001 1.0))
                               
-(defclass t-transfer ()
-  ((name :reader name :initarg :name
-         :initform (error ":name required"))
-   (function :reader function :initarg :function
-             :initform (error ":function required"))
-   (derivative :reader derivative :initarg :derivative 
-               :initform (error ":derivative required"))))
-
-(defparameter *transfers* (make-hash-table))
-
-(loop with transfer-details = 
-     (list (list :logistic #'logistic #'logistic-derivative)
-           (list :relu #'relu #'relu-derivative)
-           (list :relu-leaky #'relu-leaky #'relu-leaky-derivative))
-   for (name function derivative) in transfer-details
-   do (setf (gethash name *transfers*)
-            (make-instance 't-transfer
-                           :name name
-                           :function function
-                           :derivative derivative)))
+(defparameter *transfer-functions* 
+  (list :logistic (list :function #'logistic 
+                        :derivative #'logistic-derivative)
+        :relu (list :function #'relu
+                    :derivative #'relu-derivative)
+        :relu-leaky (list :function #'relu-leaky
+                          :derivative #'relu-leaky-derivative)))
 
 (defclass t-cx ()
   ((source :reader source :initarg :source :type t-neuron
@@ -73,6 +60,11 @@
    (last-delta :accessor delta :initarg :delta :initform 0.0)
    (limiter :accessor limiter :initarg :limiter
             :initform #'limit-magnitude-and-precision)))
+
+(defmethod initialize-instance :after ((cx t-cx) &key)
+  (push cx (effectors (source cx)))
+  (push cx (receptors (target cx)))
+  (incf (receptor-count (target cx))))
 
 (defmethod adjust-weight ((cx t-cx))
   (let* ((delta (* (learning-rate cx)
@@ -91,83 +83,70 @@
    (layer-type :accessor layer-type :initarg :layer-type)
    (biased :access biased :initarg :biased :type boolean :initform nil)
    (input :accessor input :type real :initform 0.0)
-   (transfer :accessor transfer :initarg :transfer :type t-transfer
-             :initform (gethash :logistic *transfers*))
+   (input-shadow :accessor input-shadow :type real :initform 0.0)
+   (transfer-function :accessor transfer-function 
+                      :initarg :transfer-function
+                      :type function
+                      :initform (getf (getf *transfer-functions* :logistic)
+                                      :function))
+   (transfer-derivative :accessor transfer-derivative
+                        :initarg :transfer-derivative
+                        :type function
+                        :initform (getf (getf *transfer-functions* :logistic)
+                                        :derivative))
    (output :accessor output :type real :initform 0.0)
    (err :accessor err :type real :initform 0.0)
+   (firewave :accessor firewave :type integer :initform 0)
    (x-coor :accessor x-coor :type real :initform 0.0)
    (y-coor :accessor y-coor :type real :initform 0.0)
    (z-coor :accessor z-coor :type real :initform 0.0)
    (receptor-count :accessor receptor-count :type integer :initform 0)
-   (receipts :accessor receipts :type integer :initform 0)
-   (cxs :accessor cxs :type list :initform nil)))
+   (receipt-count :accessor receipt-count :type integer :initform 0)
+   (effectors :accessor effectors :type list :initform nil)
+   (receptors :accessor receptors :type list :initform nil)))
 
 (defmethod initialize-instance :after ((neuron t-neuron) &key)
   (when (biased neuron)
     (setf (input neuron) 1.0)))
 
-(defmethod fire ((neuron t-neuron))
-  (input-to-output neuron)
-  (loop with output = (output neuron)
-       for cx in (cxs neuron)
-       do (receive (target cx) (* (weight cx) output))))
+(defgeneric fire (thing)
+  (:method ((net t-net))
+    (loop with dlist = (neurons net)
+       for node = (head dlist) then (next node)
+       while node
+       for neuron = (value node)
+       while (zerop (layer neuron))
+       do (fire neuron)))
+  (:method ((neuron t-neuron))
+    (loop with output = (input-to-output neuron)
+       for cx in (effectors neuron) do (fire cx)))
+  (:method ((cx t-cx))
+    (hit (target cx) (* (weight cx) (output (source cx))))))
 
 (defmethod input-to-output ((neuron t-neuron))
-  (setf (output neuron)
-        (funcall (function (transfer neuron)) (input neuron))))
+  (let ((input (input neuron))
+        (output (funcall (transfer-function neuron) input)))
+    (setf (input-shadow neuron) input
+          (input neuron) 0.0
+          (output neuron) output)))
 
-(defmethod receive ((neuron t-neuron) (value real))
+(defmethod hit ((neuron t-neuron) (value real))
   (incf (input neuron) value)
-  (incf (receipts neuron))
+  (incf (receipt-count neuron))
   (when (= (receipts neuron) (receptor-count neuron))
     (setf (receipts neuron) 0)
     (fire neuron)))
 
 (defclass t-net ()
-  ((id :reader id :initarg :id :type :keyword :initform (bianet-id))
+  ((id :reader id :type :keyword :initform (bianet-id))
+   (name :accessor name :type string)
    (topology :accessor topology :initarg :topology :type list :initform nil)
-   (neurons :accessor neurons :type list :initform nil)
+   (neurons :accessor neurons :type dlist :initform (make-instance 'dlist))
    (layer-count :accessor layer-count :type integer :initform 0)
-   (output-layer :accessor output-layer :type list)
-   (input-layer :accessor input-layer :type list)
+   (first-output :accessor first-outout :type dlist-node)
    (log-file :accessor log-file :type string)
    (stop-training :accessor stop-training :type boolean :initform nil)
    (random-state :accessor random-state :initform (make-random-state))))
-
-(defmethod add-neurons ((net t-net) (neurons list))
-  (setf (neurons net)
-        (append (neurons net) neurons))
-  (index-neurons net))
-
-(defmethod drop-neuron-by-location (net layer index-in-layer)
-  (loop for neuron in (neurons net)
-     for index = (if (equal (layer neuron) layer) 0 -1)
-     then (if (equal (layer neuron) layer) (1+ index) index)
-     if (and (equal layer (layer neuron))
-             (equal index-in-layer index))
-
-     collect neuron
-
-  (for (layer index-in-layer) in list-of-locations
-     for neurons = (or (elt layers layer)
-                       (setf (elt layers layer)
-                             (remove-if-not 
-                              (lambda (n) (equal (layer n) layer))
-                              (neurons net))))
-     do (setf (
-       
-
-(defun make-neurons (count layer transfer-tag)
-  (loop with transfer = (gethash transfer-tag *transfers*)
-     for a from 1 to count collect
-       (make-instance 't-neuron :layer layer :transfer transfer)))
-
-(defmethod neurons-in-layer ((net t-net) (layer-index integer))
-  (remove-if-not (lambda (n) (equal (layer neuron) layer-index))
-                 (neurons net)))
-
-(defmethod find-last-layer ((net t-net))
-    (loop for neuron in (neurons net) maximizing (layer neuron)))
 
 (defmethod index-neurons ((net t-net))
   (loop with last-layer = (find-last-layer net)
@@ -183,6 +162,105 @@
                                        ((= (layer neuron) last-layer) :output)
                                        (t :hidden)))
        (push neuron (elt layers (layer neuron)))
-     finally (setf (topology net) (mapcar #'length layers)
-                   (input-layer net) (elt layers 0)
-                   (output-layer net) (elt layers last-layer))))       
+     finally 
+       (setf (neurons net)
+             (loop for layer in layers appending
+                  (loop for neuron in (reverse layer) collect neuron)))
+       (setf (topology net) (mapcar #'length layers)
+             (input-layer net) (elt layers 0)
+             (output-layer net) (elt layers last-layer)
+             (first-output net) (car (elt layers last-layer)))))
+
+(defmethod name-neuron ((neuron t-neuron))
+  (setf (name neuron)
+        (format nil "~d-~d~a"
+                (layer neuron)
+                
+
+(defmethod find-last-neuron-in-layer ((net t-net) (layer integer))
+  (loop for node = (tail (neurons net)) then (prev node)
+     while node
+     for neuron = (value node)
+     when (equal (layer neuron) layer) do (return neuron)))
+
+(defmethod add-neuron ((net t-net) (neuron t-neuron))
+  
+  (setf (neurons net)
+        (cons neuron (neurons net)))
+  (index-neurons net))
+
+(defmethod add-neurons ((net t-net) (neurons list))
+  (setf (neurons net)
+        (append (neurons net) neurons))
+  (index-neurons net))
+
+(defgeneric find-neuron (net search)
+  (:method ((net t-net) (search keyword))
+    (find-neuron net (lambda (x) (equal (id x) search))))
+  (:method ((net t-net) (search string))
+    (find-neuron net (lambda (x) (equal (name x) search))))
+  (:method ((net t-net) (search function))
+    (loop for node = (head (neurons net)) then (next node)
+       while node
+       for neuron = (value node)
+       when (funcall search neuron) do (return neuron))))
+
+(defmethod neuron-by-id ((net t-net) (id keyword))
+  (loop for neuron (neurons net)
+     when (equal (id neuron) id) do (return neuron)))
+
+(defmethod neuron-by-name ((net t-net) (name string))
+  (loop for neuron (neurons net)
+     when (equal (name neuron) name) do (return neuron)))
+
+(defgeneric contains-neuron (net neuron)
+  (:method ((net t-net) (neuron t-neuron))
+    (contains-neuron net (id neuron)))
+  (:method ((net t-net) (id keyword))
+    (loop for neuron in (neurons net)
+       thereis (equal (id neuron) id)))
+  (:method ((net t-net) (name string))
+    (loop for neuron in (neurons net)
+       thereis (equal (name neuron) name))))
+
+(defgeneric drop-neuron (net neuron)
+  (:method ((net t-net) (neuron t-neuron))
+    (when (disconnect-neuron net neuron)
+      (setf (neurons net) 
+            (remove-if
+             (lambda (n) (equal (id n) (id neuron)))
+             (neurons net)))))
+  (:method ((net t-net) (id keyword))
+    (drop-neuron net (neuron-by-id net id)))
+  (:method ((net t-net) (name string))
+    (drop-neuron net (neuron-by-name net id))))
+
+(defmethod connectedp ((source t-neuron) (target t-neuron))
+  (loop with id = (id target)
+     for cx in (cxs source)
+     thereis (equal (id (target cx)) id)))
+
+(defmethod disconnect-neuron ((net t-net) (neuron t-neuron))
+  (when (contains-neuron net neuron)
+    (loop with id = (id neuron)
+       for upstream-neuron in (neurons net)
+       when (connectedp upstream-neuron neuron)
+       do (setf (cxs upstream-neuron)
+                (loop for cx in (cxs upstream-neuron)
+                   unless (equal (id (target cx)) id)
+                   collect cx)))
+    (loop for cx in (cxs neuron)
+       do (decf (receptor-count (target cx))))
+    neuron))       
+
+(defun make-layer-neurons (count layer transfer-tag)
+  (loop with transfer = (gethash transfer-tag *transfers*)
+     for a from 1 to count collect
+       (make-instance 't-neuron :layer layer :transfer transfer)))
+
+(defmethod neurons-in-layer ((net t-net) (layer-index integer))
+  (remove-if-not (lambda (n) (equal (layer neuron) layer-index))
+                 (neurons net)))
+
+(defmethod find-last-layer ((net t-net))
+    (loop for neuron in (neurons net) maximizing (layer neuron)))
