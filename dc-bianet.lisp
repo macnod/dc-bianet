@@ -151,42 +151,41 @@
   (loop with last-layer = (find-last-layer net)
      with layers = (loop for layer from 0 to last-layer collect nil)
      for neuron in (neurons net)
+     for index-in-layer = (length (elt layers (layer neuron)))
      do 
-       (setf (name neuron) (format nil "~d-~d~a" 
-                                   (layer neuron)
-                                   ;; The index of the neuron in its layer
-                                   (length (elt layers (layer neuron)))
-                                   (if (biased neuron) "b" ""))
-             (layer-type neuron) (cond ((zerop (layer neuron)) :input)
-                                       ((= (layer neuron) last-layer) :output)
-                                       (t :hidden)))
+       (name-neuron neuron index-in-layer)
+       (compute-layer-type neuron last-layer)
        (push neuron (elt layers (layer neuron)))
      finally 
        (setf (neurons net)
              (loop for layer in layers appending
                   (loop for neuron in (reverse layer) collect neuron)))
        (setf (topology net) (mapcar #'length layers)
-             (input-layer net) (elt layers 0)
-             (output-layer net) (elt layers last-layer)
              (first-output net) (car (elt layers last-layer)))))
 
-(defmethod name-neuron ((neuron t-neuron))
-  (setf (name neuron)
-        (format nil "~d-~d~a"
-                (layer neuron)
-                
+(defmethod name-neuron ((neuron t-neuron) (index-in-layer integer))
+  (setf (name neuron) 
+        (format nil "~d-~d~a" 
+                (layer neuron) 
+                index-in-layer 
+                (if (biased neuron) "b" ""))))
 
-(defmethod find-last-neuron-in-layer ((net t-net) (layer integer))
+(defmethod compute-layer-type ((neuron t-neuron) (last-layer integer))
+  (setf (layer-type neuron)
+        (cond ((zerop (layer neuron)) :input)
+              ((= (layer neuron) last-layer) :output)
+              (t :hidden))))
+
+(defmethod find-last-node-in-layer ((net t-net) (layer integer))
   (loop for node = (tail (neurons net)) then (prev node)
      while node
      for neuron = (value node)
-     when (equal (layer neuron) layer) do (return neuron)))
+     when (equal (layer neuron) layer) do (return node)))
 
 (defmethod add-neuron ((net t-net) (neuron t-neuron))
-  
-  (setf (neurons net)
-        (cons neuron (neurons net)))
-  (index-neurons net))
+  (let ((last-node (find-last-node-in-layer (layer neuron))))
+    (insert-after-node (neurons net) last-node neuron)
+    (index-neurons net)))
 
 (defmethod add-neurons ((net t-net) (neurons list))
   (setf (neurons net)
@@ -263,3 +262,4 @@
 
 (defmethod find-last-layer ((net t-net))
     (loop for neuron in (neurons net) maximizing (layer neuron)))
+
