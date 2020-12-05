@@ -120,21 +120,22 @@
     (loop with output = (input-to-output neuron)
        for cx in (effectors neuron) do (fire cx)))
   (:method ((cx t-cx))
-    (hit (target cx) (* (weight cx) (output (source cx))))))
+    (let ((target (target cx))
+          (source (source cx))
+          (weight (weight cx)))
+      (incf (input target) (* weight (output source)))
+      (incf (receipt-count target))
+      (when (= (receipt-count target) (receptor-count target))
+        (fire target)))))
 
 (defmethod input-to-output ((neuron t-neuron))
   (let ((input (input neuron))
         (output (funcall (transfer-function neuron) input)))
     (setf (input-shadow neuron) input
-          (input neuron) 0.0
-          (output neuron) output)))
-
-(defmethod hit ((neuron t-neuron) (value real))
-  (incf (input neuron) value)
-  (incf (receipt-count neuron))
-  (when (= (receipts neuron) (receptor-count neuron))
-    (setf (receipts neuron) 0)
-    (fire neuron)))
+          (input neuron) (if biased input 0.0)
+          (receipt-count neuron) 0
+          (output neuron) output
+          (err neuron) nil)))
 
 (defclass t-net ()
   ((id :reader id :type :keyword :initform (bianet-id))
@@ -142,7 +143,7 @@
    (topology :accessor topology :initarg :topology :type list :initform nil)
    (neurons :accessor neurons :type dlist :initform (make-instance 'dlist))
    (layer-count :accessor layer-count :type integer :initform 0)
-   (first-output :accessor first-outout :type dlist-node)
+   (first-output-node :accessor first-output-node :type dlist-node)
    (log-file :accessor log-file :type string)
    (stop-training :accessor stop-training :type boolean :initform nil)
    (random-state :accessor random-state :initform (make-random-state))))
@@ -157,18 +158,17 @@
        (compute-layer-type neuron last-layer)
        (push neuron (elt layers (layer neuron)))
      finally 
-       (setf (neurons net)
-             (loop for layer in layers appending
-                  (loop for neuron in (reverse layer) collect neuron)))
-       (setf (topology net) (mapcar #'length layers)
+       (setf (neurons net) (sorted (neurons net)
+                                   (lambda (a b) (string< (name a) (name b))))
+             (topology net) (mapcar #'length layers)
              (first-output net) (car (elt layers last-layer)))))
 
 (defmethod name-neuron ((neuron t-neuron) (index-in-layer integer))
   (setf (name neuron) 
-        (format nil "~d-~d~a" 
-                (layer neuron) 
-                index-in-layer 
-                (if (biased neuron) "b" ""))))
+        (make-neuron-name (layer neuron) index-in-layer (biased neuron))))
+
+(defun make-neuron-name (layer index-in-layer biased)
+  (format nil "~3,'0d-~9,'0d~a" layer index-in-layer (if biased "b" "a")))
 
 (defmethod compute-layer-type ((neuron t-neuron) (last-layer integer))
   (setf (layer-type neuron)
@@ -187,12 +187,7 @@
     (insert-after-node (neurons net) last-node neuron)
     (index-neurons net)))
 
-(defmethod add-neurons ((net t-net) (neurons list))
-  (setf (neurons net)
-        (append (neurons net) neurons))
-  (index-neurons net))
-
-(defgeneric find-neuron (net search)
+(defgeneric find-neuron-node (net search)
   (:method ((net t-net) (search keyword))
     (find-neuron net (lambda (x) (equal (id x) search))))
   (:method ((net t-net) (search string))
@@ -201,42 +196,30 @@
     (loop for node = (head (neurons net)) then (next node)
        while node
        for neuron = (value node)
-       when (funcall search neuron) do (return neuron))))
+       when (funcall search neuron) do (return node))))
 
-(defmethod neuron-by-id ((net t-net) (id keyword))
-  (loop for neuron (neurons net)
-     when (equal (id neuron) id) do (return neuron)))
-
-(defmethod neuron-by-name ((net t-net) (name string))
-  (loop for neuron (neurons net)
-     when (equal (name neuron) name) do (return neuron)))
-
-(defgeneric contains-neuron (net neuron)
-  (:method ((net t-net) (neuron t-neuron))
-    (contains-neuron net (id neuron)))
-  (:method ((net t-net) (id keyword))
-    (loop for neuron in (neurons net)
-       thereis (equal (id neuron) id)))
-  (:method ((net t-net) (name string))
-    (loop for neuron in (neurons net)
-       thereis (equal (name neuron) name))))
+(defun find-neuron (net search)
+  (value (find-neuron-node net search)))
 
 (defgeneric drop-neuron (net neuron)
   (:method ((net t-net) (neuron t-neuron))
-    (when (disconnect-neuron net neuron)
-      (setf (neurons net) 
-            (remove-if
-             (lambda (n) (equal (id n) (id neuron)))
-             (neurons net)))))
-  (:method ((net t-net) (id keyword))
-    (drop-neuron net (neuron-by-id net id)))
-  (:method ((net t-net) (name string))
-    (drop-neuron net (neuron-by-name net id))))
+    (let ((node (find-neuron-node net (id neuron))))
+      (when (and node (disconnect-neuron net (value node)))
+        (delete-node (neurons net) node)))))
 
 (defmethod connectedp ((source t-neuron) (target t-neuron))
   (loop with id = (id target)
      for cx in (cxs source)
      thereis (equal (id (target cx)) id)))
+
+(defmethod disconnect-neuron ((net t-net) (neuron t-neuron))
+  (when (contains-neuron net neuron)
+    (loop with id = (id neuron)
+       for node = (head (neurons net)) then (next node)
+       while node
+       for target-neuron = (value node)
+         
+
 
 (defmethod disconnect-neuron ((net t-net) (neuron t-neuron))
   (when (contains-neuron net neuron)
