@@ -1,9 +1,11 @@
+(defpackage :dc-bianet (:use :cl))
 (in-package :dc-bianet)
 
 (defparameter *magnitude-limit* 1e9)
 (defparameter *precision-limit* 1e-9)
           
 (defun limit-magnitude-and-precision (x)
+  "Limit x to a positive and negative maximum and to a maximum precision when nearing 0."
   (let ((limited-precision (if (< (abs x) *precision-limit*)
                                (* (signum x) *precision-limit*)
                                x)))
@@ -214,23 +216,28 @@
                 "expected-output-values list count" count
                 "output-layer neuron count" (len layer-dlist)))))
 
-(defmethod wave ((net t-net) (inputs list) (expected-outputs list))
+(defmethod collect-outputs ((net t-net))
+  (loop with output-layer = (tail (layer-dlist net))
+     for neuron-node = (head output-layer) then (next neuron-node)
+     while neuron-node collect (output (value neuron-node))))
+
+(defmethod infer ((net t-net) (inputs list) (expected-outputs list))
   (apply-inputs net inputs)
   (feed-forward net)
-  (if expected-outputs
-      (progn
-        (apply-expected-outputs expected-outputs)
-        (backpropagate net)
-        (loop with output-layer-dlist = (tail (layers-dlist net))
-           for neuron-node = (head output-layer-dlist) then (next neuron-node)
-           while neuron-node
-           for neuron = (value neuron-node)
-           summing (expt (err neuron) 2) into network-error))
-      (loop with output-layer-dlist = (tail (layer-dlist net))
-         for neuron-node = (head output-layer-dlist) then (next neuron-node)
-         while neuron-node
-         for neuron = (value neuron-node)
-         collect (output neuron))))
+  (collect-outputs net))
+
+(defmethod train ((net t-net) (inputs list) (expected-outputs list))
+  (apply-inputs net inputs)
+  (feed-forward net)
+  (apply-expected-outputs net expected-outputs)
+  (backpropagate net)
+  (network-error net))
+  
+(defmethod network-error ((net t-net))
+  (loop with output-layer = (tail (layers-dlist net))
+     for neuron-node = (head output-layer) then (next neuron-node)
+     while neuron-node
+     sum (expt (err (value neuron-node)) 2)))
 
 (defmethod name-neuron ((neuron t-neuron) (index-in-layer integer))
   (setf (name neuron) 
