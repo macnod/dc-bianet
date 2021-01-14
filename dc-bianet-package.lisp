@@ -1,13 +1,8 @@
 ;;;; dc-bianet-package.lisp
 
 (defpackage :dc-bianet
-  (:use :cl :dc-dlist)
-  (:export 
+  (:use :cl :dc-dlist))
 
-   t-cx 
-   t-neuron 
-   t-net
-
-))
+;;  (:export ))
 
 

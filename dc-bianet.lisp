@@ -4,6 +4,8 @@
 (defparameter *precision-limit* 1e-9)
 (defparameter *default-learning-rate* 0.02)
 (defparameter *default-momentum* 0.1)
+(defparameter *default-min-weight* -0.9)
+(defparameter *default-max-weight* 0.9)
 
 (defun make-random-weight-fn (&key (min 0.0) (max 1.0))
   (lambda (rstate &key
@@ -24,6 +26,9 @@
     (if (> (abs limited-precision) *magnitude-limit*)
         (* (signum limited-precision) *magnitude-limit*)
         limited-precision)))
+
+(defun display-float (n)
+  (read-from-string (format nil "~,4f" n)))
 
 (defun bianet-id ()
   "Returns a unique ID in the form of a Common Lisp keyword."
@@ -74,24 +79,19 @@
    (learning-rate :accessor learning-rate :initarg :learning-rate :type real
                   :initform 0.02)
    (momentum :accessor momentum :initarg :momentum :initform 0.1)
-   (last-delta :accessor delta :initarg :delta :initform 0.0)
+   (delta :accessor delta :initarg :delta :initform 0.0)
    (limiter :accessor limiter :initarg :limiter
             :initform #'limit-magnitude-and-precision)))
 
 (defclass t-neuron ()
   ((id :accessor id :initarg :id :type keyword :initform (bianet-id))
+   (name :accessor name :initarg :name :type string :initform nil)
    (input :accessor input :type real :initform 0.0)
    (biased :accessor biased :initarg :biased :type boolean :initform nil)
-   (transfer-function :accessor transfer-function 
-                      :initarg :transfer-function
-                      :type function
-                      :initform (getf (getf *transfer-functions* :logistic)
-                                      :function))
-   (transfer-derivative :accessor transfer-derivative
-                        :initarg :transfer-derivative
-                        :type function
-                        :initform (getf (getf *transfer-functions* :logistic)
-                                        :derivative))
+   (transfer-key :accessor transfer-key :initarg :transfer-key 
+                 :initform :logistic)
+   (transfer-function :accessor transfer-function :type function)
+   (transfer-derivative :accessor transfer-derivative :type function)
    (output :accessor output :type real :initform 0.0)
    (expected-output :accessor expected-output :type real :initform 0.0)
    (err :accessor err :type real :initform 0.0)
@@ -102,8 +102,15 @@
    (cx-dlist :accessor cx-dlist :type dlist :initform (make-instance 'dlist))))
 
 (defmethod initialize-instance :after ((neuron t-neuron) &key)
+  (when (not (name neuron))
+    (setf (name neuron) (format nil "~(~a~)" (id neuron))))
   (when (biased neuron)
-    (setf (input neuron) 1.0)))
+    (setf (input neuron) 1.0))
+  (let ((transfer (getf *transfer-functions* (transfer-key neuron))))
+    (setf (transfer-function neuron)
+          (getf transfer :function)
+          (transfer-derivative neuron)
+          (getf transfer :derivative))))
 
 (defmethod transfer ((neuron t-neuron))
   (let* ((input (input neuron))
@@ -150,15 +157,22 @@
     (loop
        for layer-node = (tail (layer-dlist net)) then (prev layer-node)
        while layer-node
-       do (backpropagate (value layer-node))))
+       for weight-delta = (backpropagate (value layer-node))
+       summing (* weight-delta weight-delta) into sum-of-squares
+       finally (return (limit-magnitude-and-precision 
+                        (/ sum-of-squares (len (layer-dlist net)))))))
 
   (:method ((layer dlist))
     (loop
        for neuron-node = (tail layer) then (prev neuron-node)
        while neuron-node
-       do (backpropagate (value neuron-node))))
+       for layer-weight-delta = (backpropagate (value neuron-node))
+       summing (* layer-weight-delta layer-weight-delta) into sum-of-squares
+       finally (return (limit-magnitude-and-precision
+                        (/ sum-of-squares (len layer))))))
 
   (:method ((neuron t-neuron))
+    ;; Compute neuron error
     (setf (err neuron)
           (if (zerop (len (cx-dlist neuron)))
               ;; This is an output neuron (no outgoing connections)
@@ -170,59 +184,155 @@
                  for cx = (value cx-node)
                  summing (* (weight cx) (err-derivative (target cx))))))
     (setf (err-derivative neuron)
-          (funcall (transfer-derivative neuron) (err neuron)))
+          (* (err neuron)
+             (funcall (transfer-derivative neuron) (err neuron))))
     ;; Adjust the weights of the outgoing connections
     (loop
-       for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+       with cx-dlist = (cx-dlist neuron)
+       with cx-count = (len cx-dlist)
+       for cx-node = (head cx-dlist) then (next cx-node)
+       while cx-node
        for cx = (value cx-node)
-       do (backpropagate cx)))
+       for weight-delta = (backpropagate cx)
+       summing (* weight-delta weight-delta) into sum-of-squares
+       finally (return (if (zerop cx-count)
+                           cx-count
+                           (limit-magnitude-and-precision
+                            (/ sum-of-squares cx-count))))))
 
   (:method ((cx t-cx))
     ;; Adjust the weight of this connection
     (let* ((delta (* (learning-rate cx)
                      (err-derivative (target cx))
                      (output (source cx))))
+           (weight (weight cx))
            (new-weight (limit-magnitude-and-precision
-                        (+ (weight cx) 
-                           (+ delta (* (momentum cx) (delta cx)))))))
-      (setf (weight cx) new-weight))))
+                        (+ weight delta (* (momentum cx) (delta cx))))))
+      (setf (weight cx) new-weight)
+      (- new-weight weight))))
 
 (defmethod apply-inputs ((net t-net) (input-values list))
-  (when (zerop (len (layer-dlist net))) 
-    (error "Can't apply inputs to a network with no layers."))
-  (loop with layer-dlist = (value (head (layer-dlist net)))
-     for neuron-node = (head layer-dlist) then (next neuron-node)
+  (loop with input-layer-node = (head (layer-dlist net))
+     with input-layer = (value input-layer-node)
+     for neuron-node = (head input-layer) then (next neuron-node)
      while neuron-node
      for neuron = (value neuron-node)
      for input-value in input-values
-     do (setf (input neuron) input-value)
-     counting input-value into count
-     finally 
-       (when (not (equal count (len layer-dlist)))
-         (error "~a (~d) differs from ~a (~d)"
-                "input-values list count" count
-                "input-layer neuron count" (len layer-dlist)))))
+     do (setf (input neuron) input-value)))
+
+(defmethod apply-outputs ((net t-net) (output-values list))
+  (loop with output-layer-node = (tail (layer-dlist net))
+     with output-layer = (value output-layer-node)
+     for neuron-node = (head output-layer) then (next neuron-node)
+     while neuron-node
+     for neuron = (value neuron-node)
+     for output-value in output-values
+     do (setf (output neuron) output-value)))
 
 (defmethod apply-expected-outputs ((net t-net) (expected-output-values list))
-  (when (zerop (len (layer-dlist net)))
-    (error "Can't apply outputs to a network with no layers."))
   (loop with layer-dlist = (value (tail (layer-dlist net)))
      for neuron-node = (head layer-dlist) then (next neuron-node)
      while neuron-node
      for neuron = (value neuron-node)
      for expected-output-value in expected-output-values
-     do (setf (expected-output neuron) expected-output-value)
-     counting expected-output-value into count
-     finally
-       (when (not (equal count (len layer-dlist)))
-         (error "~a (~d) differs from ~a (~d)"
-                "expected-output-values list count" count
-                "output-layer neuron count" (len layer-dlist)))))
+     do (setf (expected-output neuron) expected-output-value)))
+
+(defmethod collect-inputs ((net t-net))
+  (loop with input-layer-node = (head (layer-dlist net))
+     for input-layer = (value input-layer-node)
+     for neuron-node = (head input-layer) then (next neuron-node)
+     while neuron-node
+     for neuron = (value neuron-node)
+     collect (input neuron)))
+
+(defmethod collect-all-inputs ((net t-net))
+  (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
+     while layer-node append
+       (loop for neuron-node = (head (value layer-node)) then (next neuron-node)
+          while neuron-node
+          collect (input (value neuron-node)))))
 
 (defmethod collect-outputs ((net t-net))
-  (loop with output-layer = (tail (layer-dlist net))
+  (loop with output-layer-node = (tail (layer-dlist net))
+     for output-layer = (value output-layer-node)
      for neuron-node = (head output-layer) then (next neuron-node)
      while neuron-node collect (output (value neuron-node))))
+
+(defmethod collect-expected-outputs ((net t-net))
+  (loop with output-layer-node = (tail (layer-dlist net))
+     for output-layer = (value output-layer-node)
+     for neuron-node = (head output-layer) then (next neuron-node)
+     while neuron-node collect (expected-output (value neuron-node))))
+
+(defgeneric collect-weights (thing)
+  (:method ((net t-net))
+    (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
+       for layer-index = 1 then (1+ layer-index)
+       while layer-node
+       for layer = (value layer-node) 
+       append (collect-weights layer)))
+  (:method ((layer dlist))
+    (loop for neuron-node = (head layer) then (next neuron-node)
+       for neuron-index = 1 then (1+ neuron-index)
+       while neuron-node
+       for neuron = (value neuron-node) 
+       append (collect-weights neuron)))
+  (:method ((neuron t-neuron))
+    (loop for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+       for cx-index = 1 then (1+ cx-index)
+       while cx-node
+       for cx = (value cx-node)
+       collect (weight cx))))
+
+(defgeneric apply-weights (thing weights)
+  (:method ((net t-net) (weights list))
+    (loop for cx in (collect-cxs net)
+       for weight in weights
+       do (setf (weight cx) weight
+                (delta cx) 0.0))))
+
+(defgeneric collect-cxs (thing)
+  (:method ((net t-net))
+    (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
+       while layer-node
+       append (collect-cxs (value layer-node))))
+  (:method ((layer dlist))
+    (loop for neuron-node = (head layer) then (next neuron-node)
+       while neuron-node
+       append (collect-cxs (value neuron-node))))
+  (:method ((neuron t-neuron))
+    (loop for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+       while cx-node
+       collect (value cx-node))))
+
+(defgeneric render-as-text (thing)
+  (:method ((net t-net))
+    (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
+       for layer-index = 1 then (1+ layer-index)
+       while layer-node
+       for layer = (value layer-node)
+       do 
+         (format t "Layer ~d~%" layer-index)
+         (render-as-text layer)))
+  (:method ((layer dlist))
+    (loop for neuron-node = (head layer) then (next neuron-node)
+       while neuron-node
+       for neuron = (value neuron-node)
+       do
+         (format t "  Neuron ~a ~(~a~) i=~,4f; o=~,4f; eo=~,4f; e=~,4f; ed=~,4f~%" 
+                 (name neuron) 
+                 (transfer-key neuron)
+                 (input neuron)
+                 (output neuron)
+                 (expected-output neuron)
+                 (err neuron)
+                 (err-derivative neuron))
+         (render-as-text neuron)))
+  (:method ((neuron t-neuron))
+    (loop for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+       while cx-node
+       for cx = (value cx-node)
+       do (format t "    ~,4f -> ~a~%" (weight cx) (name (target cx))))))
 
 (defmethod infer-frame ((net t-net) (inputs list))
   (apply-inputs net inputs)
@@ -233,6 +343,57 @@
   (infer-frame net inputs)
   (apply-expected-outputs net expected-outputs)
   (backpropagate net))
+
+(defgeneric infer-frames (net input-frames)
+  (:method ((net t-net) (input-frames list))
+    (loop for frame in input-frames collect (infer-frame net frame))))
+
+(defgeneric train-frames (net training-frames)
+  (:method ((net t-net) (training-frames list))
+    (loop for (inputs expected-outputs) in training-frames
+       for count = 1 then (1+ count)
+       for weight-delta = (train-frame net inputs expected-outputs)
+       for error = 1 then (
+       summing (* weight-delta weight-delta) into sum-of-squares
+       finally (return (/ sum-of-squares count)))))
+
+(defmethod index-of-max ((list list))
+ (loop with max-index = 0 and max-value = (elt list 0)
+       for value in list
+       for index = 0 then (1+ index)
+       when (> value max-value)
+       do 
+         (setf max-index index)
+         (setf max-value value)
+       finally (return max-index)))
+
+(defmethod evaluate-inference-1hs ((net t-net) (training-frames list) 
+                                   &key show-details)
+  (loop 
+     for (inputs expected-outputs) in training-frames
+     for index = 0 then (1+ index)
+     for expected-winner = (index-of-max expected-outputs)
+     for outputs = (infer-frame net inputs)
+     for winner = (index-of-max outputs)
+     for total = 1 then (1+ total)
+     for pass = (= winner expected-winner)
+     for correct = (if pass 1 0) then (if pass (1+ correct) correct)
+     when show-details
+     collect (list :i index 
+                   :in (mapcar #'display-float inputs)
+                   :out (mapcar #'display-float outputs)
+                   :exp (mapcar #'display-float expected-outputs))
+     into details
+     finally 
+       (return 
+         (let ((result (list :percent 
+                             (format nil "~$%" (* 100 (/ correct total)))
+                             :total total 
+                             :pass correct 
+                             :fail (- total correct))))
+           (when show-details
+             (setf (getf result :details) details))
+           result))))
   
 (defmethod network-error ((net t-net) (frames list))
   (loop 
@@ -259,9 +420,9 @@
      for transfer = (getf *transfer-functions* transfer-key)
      for neuron = (make-instance 
                    't-neuron 
+                   :id (bianet-id)
                    :biased (and add-bias (= a n))
-                   :transfer-function (getf transfer :function)
-                   :transfer-derivative (getf transfer :derivative))
+                   :transfer-key transfer-key)
      do (push-tail layer neuron)
      finally (return layer)))
 
@@ -270,14 +431,33 @@
      with net = (make-instance 't-net :id id :log-file log)
      for layer-spec in topology
      for count = (or (getf layer-spec :neurons)
-                     (error ":neuron-count parameter required"))
+                     (error ":neurons parameter required"))
      for add-bias = (getf layer-spec :add-bias)
      for transfer-key = (getf layer-spec :transfer-key :logistic)
      for layer = (create-layer count 
                                :add-bias add-bias 
                                :transfer-key transfer-key)
      do (push-tail (layer-dlist net) layer)
-     finally (return net)))
+     finally 
+       (name-neurons net)
+       (return net)))
+
+(defmethod name-neurons ((net t-net))
+  (loop with global-index = 0
+     for layer-node = (head (layer-dlist net)) then (next layer-node)
+     for layer-index = 1 then (1+ layer-index)
+     while layer-node
+     for layer = (value layer-node)
+     do (loop for neuron-node = (head layer) then (next neuron-node)
+           for neuron-index = 1 then (1+ neuron-index)
+           while neuron-node
+           for neuron = (value neuron-node)
+           do (incf global-index)
+             (setf (name neuron) 
+                   (format nil "~a-~a~a" 
+                           layer-index
+                           neuron-index
+                           (if (biased neuron) "b" ""))))))
 
 (defun connect-fully (net &key 
                             (learning-rate *default-learning-rate*)
@@ -320,6 +500,45 @@
                                :target-index target-index
                                :global-source-index global-source-index
                                :global-target-index global-target-index)))))))
+
+(defgeneric randomize-weights (thing &key min max)
+  (:method ((net t-net) &key min max)
+    (loop 
+       with a = (or min *default-min-weight*) 
+       and b = (or max *default-max-weight*)
+       for layer-node = (head (layer-dlist net)) then (next layer-node)
+       while layer-node
+       do (randomize-weights (value layer-node) :min a :max b)))
+  (:method ((layer dlist) &key min max)
+    (loop 
+       with a = (or min *default-min-weight*) 
+       and b = (or max *default-max-weight*)
+       for neuron-node = (head layer) then (next neuron-node)
+       while neuron-node
+       do (randomize-weights (value neuron-node) :min a :max b)))
+  (:method ((neuron t-neuron) &key min max)
+    (loop 
+       with a = (or min *default-min-weight*) 
+       and b = (or max *default-max-weight*)
+       for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+       while cx-node
+       do (randomize-weights (value cx-node) :min a :max b)))
+  (:method ((cx t-cx) &key min max)
+    (let ((a (or min *default-min-weight*))
+          (b (or max *default-max-weight*)))
+      (setf (weight cx) (+ (random (- b a)) a)))))
+           
+
+(defmethod circle-data-1hs ((net t-net) (count integer))
+  (loop with true = 0.0 and false = 0.0 and state = (rstate net)
+     for a from 1 to count
+     for x = (random 1.0 state)
+     for y = (random 1.0 state)
+     for r = (sqrt (+ (* x x) (* y y)))
+     if (< r 0.707) do (setf true 1.0 false 0.0)
+     else do (setf true 0.0 false 1.0)
+     collect (list (list x y) (list false true))))
+
 
 ;; todo
 ;; (defmethod name-neuron ((neuron t-neuron) (index-in-layer integer))
