@@ -348,14 +348,12 @@
   (:method ((net t-net) (input-frames list))
     (loop for frame in input-frames collect (infer-frame net frame))))
 
-(defgeneric train-frames (net training-frames)
-  (:method ((net t-net) (training-frames list))
-    (loop for (inputs expected-outputs) in training-frames
-       for count = 1 then (1+ count)
-       for weight-delta = (train-frame net inputs expected-outputs)
-       for error = 1 then (
-       summing (* weight-delta weight-delta) into sum-of-squares
-       finally (return (/ sum-of-squares count)))))
+(defmethod train-frames ((net t-net) (training-frames list))
+  (loop for (inputs expected-outputs) in training-frames
+     for count = 1 then (1+ count)
+     for weight-delta = (train-frame net inputs expected-outputs)
+     summing (* weight-delta weight-delta) into sum-of-squares
+     finally (return (/ sum-of-squares count))))
 
 (defmethod index-of-max ((list list))
  (loop with max-index = 0 and max-value = (elt list 0)

@@ -29,9 +29,17 @@
 (defparameter *ann* nil)
 (defparameter *bianet* nil)
 
-(defparameter *set-10k* (dc-ann::circle-data-1hs *ann* 10000))
-(defparameter *set-1k* (dc-ann::circle-data-1hs *ann* 1000))
-(defparameter *set-10* (dc-ann::circle-data-1hs *ann* 10))
+(defun show-weights ()
+  (list :ann (dc-ann::collect-weights *ann*)
+        :bianet (dc-bianet::collect-weights *bianet*)
+        :diff (loop for ann-weight in (dc-ann::collect-weights *ann*)
+                 for bianet-weight in (dc-bianet::collect-weights *bianet*)
+                 collect (- bianet-weight ann-weight))))
+
+(defun reset-weights (weights)
+      (dc-ann::apply-weights *ann* weights)
+      (dc-bianet::apply-weights *bianet* weights)
+      (show-weights))
 
 (defun make-nets ()
   (setq *ann* (dc-ann::train-1)
@@ -44,10 +52,11 @@
   (dc-bianet::connect-fully *bianet*)
   (reset-weights *random-weights*))
 
-(defun reset-weights (weights)
-      (dc-ann::apply-weights *ann* weights)
-      (dc-bianet::apply-weights *bianet* weights)
-      (show-weights))
+(make-nets)
+
+(defparameter *set-10k* (dc-ann::circle-data-1hs *ann* 10000))
+(defparameter *set-1k* (dc-ann::circle-data-1hs *ann* 1000))
+(defparameter *set-10* (dc-ann::circle-data-1hs *ann* 10))
 
 (defun evaluate-inference (set)
   (list :ann (dc-ann::evaluate-training-1hs *ann* set)
@@ -64,13 +73,6 @@
 
 (defun feed-from-set (set index)
   (feed (car (elt set index))))
-
-(defun show-weights ()
-  (list :ann (dc-ann::collect-weights *ann*)
-        :bianet (dc-bianet::collect-weights *bianet*)
-        :diff (loop for ann-weight in (dc-ann::collect-weights *ann*)
-                 for bianet-weight in (dc-bianet::collect-weights *bianet*)
-                 collect (- bianet-weight ann-weight))))
 
 (defun show-inputs ()
   (let ((ann-inputs (dc-ann::collect-inputs *ann*))
