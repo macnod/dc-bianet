@@ -18,14 +18,15 @@
                      global-source-index global-target-index))
     (+ min (random (- max min) rstate))))
 
-(defun limit-magnitude-and-precision (x)
-  "Limit x to a positive and negative maximum and to a maximum precision when nearing 0."
-  (let ((limited-precision (if (< (abs x) *precision-limit*)
-                               (* (signum x) *precision-limit*)
+(defun make-limiter (&key (magnitude *magnitude-limit*)
+                       (precision *precision-limit*))
+  (lambda (x)
+    (let ((limited-precision (if (< (abs x) precision)
+                               (* (signum x) precision)
                                x)))
-    (if (> (abs limited-precision) *magnitude-limit*)
-        (* (signum limited-precision) *magnitude-limit*)
-        limited-precision)))
+    (if (> (abs limited-precision) magnitude)
+        (* (signum limited-precision) magnitude)
+        limited-precision))))
 
 (defun display-float (n)
   (read-from-string (format nil "~,4f" n)))
@@ -81,7 +82,7 @@
    (momentum :accessor momentum :initarg :momentum :initform 0.1)
    (delta :accessor delta :initarg :delta :initform 0.0)
    (limiter :accessor limiter :initarg :limiter
-            :initform #'limit-magnitude-and-precision)))
+            :initform (make-limiter))))
 
 (defclass t-neuron ()
   ((id :accessor id :initarg :id :type keyword :initform (bianet-id))
@@ -152,64 +153,51 @@
           (* (weight cx) (output (source cx))))))
 
 (defgeneric backpropagate (thing)
-  
   (:method ((net t-net))
     (loop
        for layer-node = (tail (layer-dlist net)) then (prev layer-node)
        while layer-node
-       for weight-delta = (backpropagate (value layer-node))
-       summing (* weight-delta weight-delta) into sum-of-squares
-       finally (return (limit-magnitude-and-precision 
-                        (/ sum-of-squares (len (layer-dlist net)))))))
+       do (backpropagate (value layer-node))))
 
   (:method ((layer dlist))
     (loop
        for neuron-node = (tail layer) then (prev neuron-node)
-       while neuron-node
-       for layer-weight-delta = (backpropagate (value neuron-node))
-       summing (* layer-weight-delta layer-weight-delta) into sum-of-squares
-       finally (return (limit-magnitude-and-precision
-                        (/ sum-of-squares (len layer))))))
+       while neuron-node do (backpropagate (value neuron-node))))
 
   (:method ((neuron t-neuron))
-    ;; Compute neuron error
-    (setf (err neuron)
-          (if (zerop (len (cx-dlist neuron)))
-              ;; This is an output neuron (no outgoing connections)
-              (- (expected-output neuron) (output neuron))
-              ;; This is an input-layer or hidden neuron
-              (loop
-                 for cx-node = (head (cx-dlist neuron)) then (next cx-node)
-                 while cx-node
-                 for cx = (value cx-node)
-                 summing (* (weight cx) (err-derivative (target cx))))))
-    (setf (err-derivative neuron)
-          (* (err neuron)
-             (funcall (transfer-derivative neuron) (err neuron))))
-    ;; Adjust the weights of the outgoing connections
+    (compute-neuron-error neuron)
+    (adjust-neuron-cx-weights neuron)))
+
+(defmethod compute-neuron-error ((neuron t-neuron))
+  (setf (err neuron)
+        (if (zerop (len (cx-dlist neuron)))
+            ;; This is an output neuron (no outgoing connections)
+            (- (expected-output neuron) (output neuron))
+            ;; This is an input-layer or hidden-layer neuron;  we need 
+            ;; to use the errors of downstream neurons to compute the
+            ;; error of this neuron
+            (loop
+               for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+               while cx-node
+               for cx = (value cx-node)
+               summing (* (weight cx) (err-derivative (target cx))))))
+  (setf (err-derivative neuron)
+        (* (err neuron)
+           (funcall (transfer-derivative neuron) (output neuron)))))
+
+(defmethod adjust-neuron-cx-weights ((neuron t-neuron))
     (loop
        with cx-dlist = (cx-dlist neuron)
-       with cx-count = (len cx-dlist)
        for cx-node = (head cx-dlist) then (next cx-node)
-       while cx-node
-       for cx = (value cx-node)
-       for weight-delta = (backpropagate cx)
-       summing (* weight-delta weight-delta) into sum-of-squares
-       finally (return (if (zerop cx-count)
-                           cx-count
-                           (limit-magnitude-and-precision
-                            (/ sum-of-squares cx-count))))))
+       while cx-node do (adjust-cx-weight (value cx-node))))
 
-  (:method ((cx t-cx))
-    ;; Adjust the weight of this connection
-    (let* ((delta (* (learning-rate cx)
-                     (err-derivative (target cx))
-                     (output (source cx))))
-           (weight (weight cx))
-           (new-weight (limit-magnitude-and-precision
-                        (+ weight delta (* (momentum cx) (delta cx))))))
-      (setf (weight cx) new-weight)
-      (- new-weight weight))))
+(defmethod adjust-cx-weight ((cx t-cx))
+  (let* ((delta (* (learning-rate cx)
+                   (err-derivative (target cx))
+                   (output (source cx))))
+         (new-weight (funcall (limiter cx)
+                              (+ (weight cx) delta (* (momentum cx) (delta cx))))))
+    (setf (weight cx) new-weight)))
 
 (defmethod apply-inputs ((net t-net) (input-values list))
   (loop with input-layer-node = (head (layer-dlist net))
@@ -351,9 +339,7 @@
 (defmethod train-frames ((net t-net) (training-frames list))
   (loop for (inputs expected-outputs) in training-frames
      for count = 1 then (1+ count)
-     for weight-delta = (train-frame net inputs expected-outputs)
-     summing (* weight-delta weight-delta) into sum-of-squares
-     finally (return (/ sum-of-squares count))))
+     do (train-frame net inputs expected-outputs)))
 
 (defmethod index-of-max ((list list))
  (loop with max-index = 0 and max-value = (elt list 0)
@@ -439,6 +425,19 @@
      finally 
        (name-neurons net)
        (return net)))
+
+(defun create-standard-net (topology 
+                            &key 
+                              (transfer-function :relu)
+                              (id (bianet-id))
+                              log-file
+                              (weight-reset-function 
+                               (make-random-weight-fn :min -0.9 :max 0.9))
+                              (limiter (make-limiter))
+                              (momentum *default-momentum*)
+                              (learning-rate *default-learning-rate*))
+                              
+  (loop with log = (or log-file
 
 (defmethod name-neurons ((net t-net))
   (loop with global-index = 0
@@ -536,91 +535,4 @@
      if (< r 0.707) do (setf true 1.0 false 0.0)
      else do (setf true 0.0 false 1.0)
      collect (list (list x y) (list false true))))
-
-
-;; todo
-;; (defmethod name-neuron ((neuron t-neuron) (index-in-layer integer))
-;;   (setf (name neuron) 
-;;         (make-neuron-name (layer neuron) index-in-layer (biased neuron))))
-
-;; (defun make-neuron-name (layer index-in-layer biased)
-;;   (format nil "~3,'0d-~9,'0d~a" layer index-in-layer (if biased "b" "a")))
-
-;; todo
-;; (defmethod compute-layer-type ((neuron t-neuron) (last-layer integer))
-;;   (setf (layer-type neuron)
-;;         (cond ((zerop (layer neuron)) :input)
-;;               ((= (layer neuron) last-layer) :output)
-;;               (t :hidden))))
-
-;; (defmethod find-last-node-in-layer ((net t-net) (layer integer))
-;;   (loop for node = (tail (neurons-dlist net)) then (prev node)
-;;      while node
-;;      for neuron = (value node)
-;;      when (equal (layer neuron) layer) do (return node)))
-
-;; (defmethod add-neuron ((net t-net) (neuron t-neuron))
-;;   (let ((last-node (find-last-node-in-layer (layer neuron))))
-;;     (insert-after-node (neurons-dlist net) last-node neuron)
-;;     (index-neurons net)))
-
-;; (defgeneric find-neuron-node (net search)
-;;   (:method ((net t-net) (search keyword))
-;;     (find-neuron net (lambda (x) (equal (id x) search))))
-;;   (:method ((net t-net) (search string))
-;;     (find-neuron net (lambda (x) (equal (name x) search))))
-;;   (:method ((net t-net) (search function))
-;;     (loop for node = (head (neurons-dlist net)) then (next node)
-;;        while node
-;;        for neuron = (value node)
-;;        when (funcall search neuron) do (return node))))
-
-;; (defun find-neuron (net search)
-;;   (value (find-neuron-node net search)))
-
-;; (defgeneric drop-neuron (net neuron)
-;;   (:method ((net t-net) (neuron t-neuron))
-;;     (let ((node (find-neuron-node net (id neuron))))
-;;       (when (and node (disconnect-neuron net (value node)))
-;;         (delete-node (neurons-dlist net) node)))))
-
-;; (defmethod connectedp ((source t-neuron) (target t-neuron))
-;;   (loop with id = (id target)
-;;      for cx in (cxs source)
-;;      thereis (equal (id (target cx)) id)))
-
-;; (defmethod disconnect-neuron ((net t-net) (neuron t-neuron))
-;;   (when (contains-neuron net neuron)
-;;     (loop with id = (id neuron)
-;;        for node = (head (neurons-dlist net)) then (next node)
-;;        while node
-;;        for target-neuron = (value node)
-         
-
-
-;; (defmethod disconnect-neuron ((net t-net) (neuron t-neuron))
-;;   (when (contains-neuron net neuron)
-;;     (loop with id = (id neuron)
-;;        for upstream-neuron in (neurons-dlist net)
-;;        when (connectedp upstream-neuron neuron)
-;;        do (setf (cxs upstream-neuron)
-;;                 (loop for cx in (cxs upstream-neuron)
-;;                    unless (equal (id (target cx)) id)
-;;                    collect cx)))
-;;     (loop for cx in (cxs neuron)
-;;        do (decf (receptor-count (target cx))))
-;;     neuron))       
-
-;; (defun make-layer-neurons (count layer transfer-tag)
-;;   (loop with transfer = (gethash transfer-tag *transfers*)
-;;      for a from 1 to count collect
-;;        (make-instance 't-neuron :layer layer :transfer transfer)))
-
-;; (defmethod neurons-in-layer ((net t-net) (layer-index integer))
-;;   (remove-if-not (lambda (n) (equal (layer neuron) layer-index))
-;;                  (neurons-dlist net)))
-
-;; (defmethod find-last-layer ((net t-net))
-;;   (loop for neuron in (to-list (neurons-dlist net))
-;;        maximizing (layer neuron)))
 

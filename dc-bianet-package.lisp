@@ -1,8 +1,77 @@
 ;;;; dc-bianet-package.lisp
 
 (defpackage :dc-bianet
-  (:use :cl :dc-dlist))
+  (:use :cl :dc-dlist)
 
-;;  (:export ))
-
-
+  (:export 
+   make-random-weight-fn
+   limit-magnitude-and-precision
+   display-float
+   bianet-id
+   logistic
+   logistic-derivative
+   relu
+   relu-derivative
+   relu-leaky
+   relu-leaky-derivative
+   t-cx
+   source
+   target
+   weight
+   learning-rate
+   momentum
+   delta
+   limiter
+   t-neuron
+   id
+   name
+   input
+   biased
+   transfer-key
+   transfer-function
+   transfer-derivative
+   output
+   expected-output
+   err
+   err-derivative
+   x-coor
+   y-coor
+   z-coor
+   cx-dlist
+   transfer
+   tnet
+   layer-dlist
+   log-file
+   stop-training
+   rstate
+   feedforward
+   backpropagate
+   compute-neuron-error
+   adjust-neuron-cx-weights
+   adjust-cx-weight
+   apply-inputs
+   apply-outputs
+   apply-expected-outputs
+   collect-inputs
+   collect-all-inputs
+   collect-outputs
+   collect-expected-outputs
+   collect-weights
+   apply-weights
+   collect-cxs
+   render-as-text
+   infer-frame
+   train-frame
+   infer-frames
+   train-frames
+   index-of-max
+   evaluate-inference-1hs
+   network-error
+   infer
+   create-layer
+   create-net
+   name-neurons
+   connect-fully
+   randomize-weights
+   circle-data-1hs
+))
