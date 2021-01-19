@@ -426,7 +426,7 @@
        (name-neurons net)
        (return net)))
 
-(defun create-standard-net (topology 
+(defun create-standard-net (succinct-topology 
                             &key 
                               (transfer-function :relu)
                               (id (bianet-id))
@@ -436,8 +436,29 @@
                               (limiter (make-limiter))
                               (momentum *default-momentum*)
                               (learning-rate *default-learning-rate*))
-                              
-  (loop with log = (or log-file
+  (loop with log = (or log-file (format nil "/tmp/~(~a~).log" id))
+     with net = (make-instance 't-net :id id :log-file log)
+     with last-layer = (1- (length succinct-topology))
+     for neuron-count in succinct-topology
+     for layer-index = 0 then (1+ layer-index)
+     for in-input-layer = (zerop layer-index)
+     for in-output-layer = (= layer-index last-layer)
+     for in-hidden-layer = (and (not in-input-layer) (not in-output-layer))
+     for transfer-key = (if in-output-layer :logistic transfer-function)
+     for layer = (create-layer neuron-count 
+                               :add-bias in-hidden-layer 
+                               :transfer-key transfer-key)
+     do (push-tail (layer-dlist net) layer)
+     finally
+       (name-neurons net)
+       (connect-fully net
+                      :learning-rate learning-rate
+                      :momentum momentum
+                      :initial-weight-function weight-reset-function
+                      :limiter limiter)
+       (return net)))
+                               
+    
 
 (defmethod name-neurons ((net t-net))
   (loop with global-index = 0
@@ -460,7 +481,8 @@
                             (learning-rate *default-learning-rate*)
                             (momentum *default-momentum*)
                             (initial-weight-function 
-                             (make-random-weight-fn :min -0.9 :max 0.9)))
+                             (make-random-weight-fn :min -0.9 :max 0.9))
+                            (limiter (make-limiter)))
   (loop with layer-count = (len (layer-dlist net)) 
      and global-source-index = 0
      and global-target-index = 0
@@ -489,6 +511,7 @@
                       :target target
                       :learning-rate learning-rate
                       :momentum momentum
+                      :limiter limiter
                       :weight (funcall 
                                initial-weight-function
                                (rstate net)
