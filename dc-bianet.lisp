@@ -341,6 +341,85 @@
      for count = 1 then (1+ count)
      do (train-frame net inputs expected-outputs)))
 
+(defun hash-table-to-plist (hash-table)
+  (loop for k being the hash-keys in hash-table using (hash-value v)
+       collect (list k v)))
+
+;; Type-1 files are CSV files that have rows with one label at the
+;; beginning of the row, followed by input values.  You can determine
+;; the number of output neurons needed by counting the distinct labels
+;; present in the file.
+(defun train-on-type-1-file (net filename)
+  (let ((label-counts (type-1-file->label-counts filename)))
+    (with-open-file (file filename)
+      (loop with label-outputs = (label-outputs-hash
+                                   (label-counts->label-indexes label-counts))
+         for line = (read-line file nil)
+         for line-number = 1 then (1+ line-number)
+         while (and line (> (length line) 1))
+         for values = (split "," line)
+         for label = (car values)
+         for inputs = (mapcar #'read-from-string (cdr values))
+         for expected-outputs = (gethash label label-outputs)
+         do (train-frame net inputs expected-outputs)
+         when (zerop (mod line-number 100))
+         do (format t "processed ~d~%" line-number)))))
+
+(defun type-1-file->set (filename)
+  (let* ((label-counts (type-1-file->label-counts filename))
+         (label-outputs (label-outputs-hash 
+                        (label-counts->label-indexes label-counts)))
+         (line-count (file-line-count filename))
+         (set (make-array line-count :element-type 'list :initial-element nil)))
+    (with-open-file (file filename)
+      (loop for line = (read-line file nil)
+         for index = 1 then (1+ index)
+         while (and line (> (length line) 1))
+         for values = (type-1-csv-line->label-and-inputs line)
+         for label = (car values)
+         for inputs = (cdr values)
+         for expected-outputs = (gethash label label-outputs)
+         do (setf (aref set index) (list inputs expected-outputs))))
+    set))
+         
+(defun label-outputs-hash (label-indexes)
+  (loop with label-outputs = (make-hash-table :test 'equal)
+     for label being the hash-keys in label-indexes using (hash-value index)
+     do (setf (gethash label label-outputs)
+              (label->outputs label label-indexes))
+     finally (return label-outputs)))
+
+(defun label->outputs (label label-indexes)
+  (loop with index = (gethash label label-indexes)
+     for a from 0 below (hash-table-count label-indexes)
+     collect (if (= a index) 1.0 0.0)))
+
+(defun outputs->label (outputs index-labels)
+  (gethash (index-of-max outputs) index-labels))
+         
+(defun label-counts->label-indexes (label-counts)
+  (loop with label-indexes = (make-hash-table :test 'equal)
+     for label in (sort (loop for label being the hash-keys in label-counts
+                           collect label)
+                        #'string<)
+     for index = 0 then (1+ index)
+     do (setf (gethash label label-indexes) index)
+     finally (return label-indexes)))
+
+(defun label-indexes->index-labels (label-indexes)
+  (loop with index-labels = (make-hash-table)
+     for label being the hash-keys in label-indexes using (hash-value index)
+     do (setf (gethash index index-labels) label)))
+
+(defun type-1-file->label-counts (filename)
+  (let ((label-counts (make-hash-table :test 'equal)))
+    (with-open-file (file filename)
+      (loop for line = (read-line file nil)
+         while line
+         for label = (subseq line 0 (search "," line))
+         do (incf (gethash label label-counts 0))))
+    label-counts))
+
 (defmethod index-of-max ((list list))
  (loop with max-index = 0 and max-value = (elt list 0)
        for value in list
@@ -559,3 +638,32 @@
      else do (setf true 0.0 false 1.0)
      collect (list (list x y) (list false true))))
 
+(defun shell-execute (program &optional parameters (input-pipe-data ""))
+  "Run PROGRAM and return the output of the program as a string.  You can pass an atom or a list for PARAMETERS (the command-line options for the program). You can also pipe data to the program by passing the INPUT-PIPE-DATA parameter with a string containing the data you want to pipe.  The INPUT-PIPE-DATA parameter defaults to the empty string."
+  (let ((parameters (cond ((null parameters) nil)
+                          ((atom parameters) (list parameters))
+                          (t parameters))))
+    (with-output-to-string (output-stream)
+      (with-output-to-string (error-stream)
+        (with-input-from-string (input-stream input-pipe-data)
+          (sb-ext:run-program program parameters
+                              :search t
+                              :output output-stream
+                              :error error-stream
+                              :input input-stream))))))
+
+(defun file-line-count (filename)
+  (let ((result (shell-execute "wc" (list "-l" filename))))
+    (if (zerop (length result))
+        nil
+        (read-from-string result))))
+
+(defun type-1-csv-line->label-and-inputs (csv-line)
+  (loop with word = nil
+     for c across csv-line
+     if (char= c #\,) collect word into words and do (setf word nil)
+     else do (push c word)
+     finally (return (loop for chars in (reverse (cons word (reverse words)))
+                        for first = t then nil
+                        for string = (map 'string 'identity chars)
+                        collect (if first string (read-from-string string))))))
