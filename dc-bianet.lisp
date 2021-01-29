@@ -6,6 +6,41 @@
 (defparameter *default-momentum* 0.1)
 (defparameter *default-min-weight* -0.9)
 (defparameter *default-max-weight* 0.9)
+(defparameter *job-queue* nil) ;; Instance of dlist
+(defparameter *thread-pool-running* nil)
+(defparameter *job-counter* 0)
+(defparameter *job-counter-mutex* (make-mutex :name "job-counter-mutex"))
+(defparameter *gate* (make-gate))
+(defparameter *thread-pool* nil)
+(defparameter *jobs-run* nil) ;; Instance of dlist
+(defparameter *target-input-impact-mutex* (make-mutex :name "target-input-impact"))
+
+(defun thread-work ()
+  (loop while *thread-pool-running*
+     for job = (when *job-queue* (pop-tail *job-queue*))
+     if job do 
+       (funcall (second job))
+       (push-tail *jobs-run* (first job))
+       (with-mutex (*job-counter-mutex*)
+         (incf *job-counter*))
+     do (sleep 0.01)))
+
+(defun start-thread-pool (thread-count)
+  (setf *thread-pool-running* t)
+  (setf *job-queue* (make-instance 'dlist))
+  (setf *jobs-run* (make-instance 'dlist))
+  (setf *job-counter* 0)
+  (setf *thread-pool*
+        (loop for a from 1 to thread-count collect
+             (make-thread #'thread-work :name "thread-work"))))
+
+(defun get-job-count ()
+  (with-mutex (*job-counter-mutex*)
+    *job-counter*))
+
+(defun stop-thread-pool ()
+  (setf *thread-pool-running* nil)
+  (loop for thread in *thread-pool* do (join-thread thread)))
 
 (defun make-random-weight-fn (&key (min 0.0) (max 1.0))
   (lambda (rstate &key
@@ -168,6 +203,102 @@
     (compute-neuron-error neuron)
     (adjust-neuron-cx-weights neuron)))
 
+(defgeneric feedforward-c (thing)
+
+  (:method ((net t-net))
+    (loop 
+       for layer-node = (head (layer-dlist net)) then (next layer-node)
+       while layer-node
+       do (feedforward-c (value layer-node))))
+
+  (:method ((layer dlist))
+    (loop 
+       for neuron-node = (head layer) then (next neuron-node)
+       while neuron-node
+       collect (make-thread 
+                (let ((neuron (value neuron-node)))
+                  (lambda () (feedforward-c (value neuron)))))
+       into threads
+       finally (loop for thread in threads do (join-thread thread))))
+
+  (:method ((neuron t-neuron))
+    (loop initially (transfer neuron)
+       for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+       while cx-node
+       do (feedforward-c (value cx-node))))
+
+  (:method ((cx t-cx))
+    (incf (input (target cx)) 
+          (* (weight cx) (output (source cx))))))
+
+(defgeneric backpropagate-c (thing)
+  (:method ((net t-net))
+    (loop
+       for layer-node = (tail (layer-dlist net)) then (prev layer-node)
+       while layer-node
+       do (backpropagate-c (value layer-node))))
+
+  (:method ((layer dlist))
+    (loop
+       for neuron-node = (tail layer) then (prev neuron-node)
+       while neuron-node 
+       collect (make-thread (lambda () (backpropagate-c (value neuron-node))))
+       into threads
+       finally (loop for thread in threads do (join-thread thread))))
+
+  (:method ((neuron t-neuron))
+    (compute-neuron-error neuron)
+    (adjust-neuron-cx-weights neuron)))
+
+(defgeneric feedforward-d (thing)
+
+  (:method ((net t-net))
+    (loop 
+       for layer-node = (head (layer-dlist net)) then (next layer-node)
+       while layer-node
+       do (feedforward-d (value layer-node))))
+
+  (:method ((layer dlist))
+    (loop 
+       for neuron-node = (head layer) then (next neuron-node)
+       while neuron-node
+       do (push-head *job-queue* 
+                     (list :fire
+                           (let ((neuron (value neuron-node)))
+                             (lambda () (feedforward-d neuron)))))))
+  (:method ((neuron t-neuron))
+    (loop initially (transfer neuron)
+       for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+       while cx-node
+       do (feedforward-d (value cx-node))))
+
+  (:method ((cx t-cx))
+    (let ((target-input-impact (* (weight cx) (output (source cx)))))
+      (with-mutex (*target-input-impact-mutex*)
+        (incf (input (target cx)) target-input-impact)))))
+          
+
+(defgeneric backpropagate-d (thing)
+
+  (:method ((net t-net))
+    (loop
+       for layer-node = (tail (layer-dlist net)) then (prev layer-node)
+       while layer-node
+       do (backpropagate-d (value layer-node))))
+
+  (:method ((layer dlist))
+    (loop
+       for neuron-node = (tail layer) then (prev neuron-node)
+       while neuron-node 
+       do (push-head *job-queue* 
+                     (list :fire 
+                           (let ((neuron (value neuron-node)))
+                             (lambda () (backpropagate-d neuron)))))))
+
+  (:method ((neuron t-neuron))
+    (compute-neuron-error neuron)
+    (adjust-neuron-cx-weights neuron)))
+
 (defmethod compute-neuron-error ((neuron t-neuron))
   (setf (err neuron)
         (if (zerop (len (cx-dlist neuron)))
@@ -191,12 +322,19 @@
        for cx-node = (head cx-dlist) then (next cx-node)
        while cx-node do (adjust-cx-weight (value cx-node))))
 
+;; (defmethod adjust-cx-weight ((cx t-cx))
+;;   (let* ((delta (* (learning-rate cx)
+;;                    (err-derivative (target cx))
+;;                    (output (source cx))))
+;;          (new-weight (funcall (limiter cx)
+;;                               (+ (weight cx) delta (* (momentum cx) (delta cx))))))
+;;     (setf (weight cx) new-weight)))
+
 (defmethod adjust-cx-weight ((cx t-cx))
   (let* ((delta (* (learning-rate cx)
                    (err-derivative (target cx))
                    (output (source cx))))
-         (new-weight (funcall (limiter cx)
-                              (+ (weight cx) delta (* (momentum cx) (delta cx))))))
+         (new-weight (+ (weight cx) delta (* (momentum cx) (delta cx)))))
     (setf (weight cx) new-weight)))
 
 (defmethod apply-inputs ((net t-net) (input-values list))
@@ -245,6 +383,12 @@
      for output-layer = (value output-layer-node)
      for neuron-node = (head output-layer) then (next neuron-node)
      while neuron-node collect (output (value neuron-node))))
+
+(defmethod collect-output-errors ((net t-net))
+  (loop with output-layer-node = (tail (layer-dlist net))
+     with output-layer = (value output-layer-node)
+     for neuron-node = (head output-layer) then (next neuron-node)
+     while neuron-node collect (err (value neuron-node))))
 
 (defmethod collect-expected-outputs ((net t-net))
   (loop with output-layer-node = (tail (layer-dlist net))
@@ -327,19 +471,126 @@
   (feedforward net)
   (collect-outputs net))
 
+(defmethod infer-frame-c ((net t-net) (inputs list))
+  (apply-inputs net inputs)
+  (feedforward-c net)
+  (collect-outputs net))
+
+(defmethod infer-frame-d ((net t-net) (inputs list))
+  (apply-inputs net inputs)
+  (feedforward-d net)
+  (collect-outputs net))
+
 (defmethod train-frame ((net t-net) (inputs list) (expected-outputs list))
   (infer-frame net inputs)
   (apply-expected-outputs net expected-outputs)
   (backpropagate net))
 
+(defmethod train-frame-c ((net t-net) (inputs list) (expected-outputs list))
+  (infer-frame-c net inputs)
+  (apply-expected-outputs net expected-outputs)
+  (backpropagate-c net))
+
+(defmethod train-frame-d ((net t-net) (inputs list) (expected-outputs list))
+  (infer-frame-d net inputs)
+  (apply-expected-outputs net expected-outputs)
+  (backpropagate-d net))
+
 (defgeneric infer-frames (net input-frames)
   (:method ((net t-net) (input-frames list))
     (loop for frame in input-frames collect (infer-frame net frame))))
 
-(defmethod train-frames ((net t-net) (training-frames list))
-  (loop for (inputs expected-outputs) in training-frames
+(defmethod train-frames ((net t-net) 
+                         (training-frames list)
+                         (report-function function)
+                         (report-frequency function))
+  (loop with start-time = (get-universal-time) and last-report-time = -1
+     for (inputs expected-outputs) in training-frames
      for count = 1 then (1+ count)
-     do (train-frame net inputs expected-outputs)))
+     for elapsed-seconds = (- (get-universal-time) start-time)
+     do (train-frame net inputs expected-outputs)
+     when (and (not (= elapsed-seconds last-report-time))
+               (funcall report-frequency count elapsed-seconds))
+     do (funcall report-function 
+                 count 
+                 elapsed-seconds 
+                 (collect-output-errors net))
+       (setf last-report-time elapsed-seconds)))
+
+(defmethod train-frames-c ((net t-net)
+                           (training-frames list)
+                           (report-function function)
+                           (report-frequency function))
+  (loop with start-time = (get-universal-time) and last-report-time = -1
+     for (inputs expected-outputs) in training-frames
+     for count = 1 then (1+ count)
+     for elapsed-seconds = (- (get-universal-time) start-time)
+     do (train-frame-c net inputs expected-outputs)
+     when (and (not (= elapsed-seconds last-report-time))
+               (funcall report-frequency count elapsed-seconds))
+     do (funcall report-function 
+                 count 
+                 elapsed-seconds 
+                 (collect-output-errors net))
+       (setf last-report-time elapsed-seconds)))
+
+(defmethod train-frames-d ((net t-net)
+                           (training-frames list)
+                           (report-function function)
+                           (report-frequency function))
+  (loop with start-time = (get-universal-time) and last-report-time = -1
+     for (inputs expected-outputs) in training-frames
+     for count = 1 then (1+ count)
+     for elapsed-seconds = (- (get-universal-time) start-time)
+     do (train-frame-d net inputs expected-outputs)
+     when (and (not (= elapsed-seconds last-report-time))
+               (funcall report-frequency count elapsed-seconds))
+     do (funcall report-function 
+                 count 
+                 elapsed-seconds 
+                 (collect-output-errors net))
+       (setf last-report-time elapsed-seconds)))
+
+(defmethod train-frames ((net t-net) 
+                         (training-frames array)
+                         (report-function function)
+                         (report-frequency function))
+  (train-frames net
+                (map 'list 'identity training-frames)
+                report-function
+                report-frequency))
+
+(defun default-report-frequency (count elapsed-seconds)
+  (declare (ignore count elapsed-seconds))
+  t)
+
+(defun default-report-function (count elapsed-seconds output-errors)
+  (declare (ignore output-errors))
+  (format t "elapsed=~d; processed=~d;~%" elapsed-seconds count))
+
+(defgeneric normalize-set (set)
+  (:method ((set list))
+    (loop with max-value = (loop for frame in set
+                              for inputs = (car frame)
+                              maximizing (loop for input in inputs 
+                                            maximizing input))
+       with min-value = (loop for frame in set
+                           for inputs = (car frame)
+                           minimizing (loop for input in inputs
+                                         minimizing input))
+       with range = (float (- max-value min-value))
+       for frame in set
+       for input-values = (car frame)
+       for expected-outputs = (second frame)
+       collect 
+         (list
+          (loop for input-value in input-values 
+             for new-value = (/ (- input-value min-value) range)
+             collect new-value)
+          expected-outputs)))
+  (:method ((set array))
+    (normalize-set (map 'list 'identity set))))
+
 
 (defun hash-table-to-plist (hash-table)
   (loop for k being the hash-keys in hash-table using (hash-value v)
@@ -373,7 +624,7 @@
          (set (make-array line-count :element-type 'list :initial-element nil)))
     (with-open-file (file filename)
       (loop for line = (read-line file nil)
-         for index = 1 then (1+ index)
+         for index = 0 then (1+ index)
          while (and line (> (length line) 1))
          for values = (type-1-csv-line->label-and-inputs line)
          for label = (car values)
@@ -430,33 +681,25 @@
          (setf max-value value)
        finally (return max-index)))
 
-(defmethod evaluate-inference-1hs ((net t-net) (training-frames list) 
-                                   &key show-details)
-  (loop 
-     for (inputs expected-outputs) in training-frames
-     for index = 0 then (1+ index)
-     for expected-winner = (index-of-max expected-outputs)
-     for outputs = (infer-frame net inputs)
-     for winner = (index-of-max outputs)
-     for total = 1 then (1+ total)
-     for pass = (= winner expected-winner)
-     for correct = (if pass 1 0) then (if pass (1+ correct) correct)
-     when show-details
-     collect (list :i index 
-                   :in (mapcar #'display-float inputs)
-                   :out (mapcar #'display-float outputs)
-                   :exp (mapcar #'display-float expected-outputs))
-     into details
-     finally 
-       (return 
-         (let ((result (list :percent 
-                             (format nil "~$%" (* 100 (/ correct total)))
-                             :total total 
-                             :pass correct 
-                             :fail (- total correct))))
-           (when show-details
-             (setf (getf result :details) details))
-           result))))
+(defgeneric evaluate-inference-1hs (net training-frames)
+  (:method ((net t-net) (training-frames list))
+    (loop 
+       for (inputs expected-outputs) in training-frames
+       for index = 0 then (1+ index)
+       for expected-winner = (index-of-max expected-outputs)
+       for outputs = (infer-frame net inputs)
+       for winner = (index-of-max outputs)
+       for total = 1 then (1+ total)
+       for pass = (= winner expected-winner)
+       for correct = (if pass 1 0) then (if pass (1+ correct) correct)
+       finally 
+         (return (list :percent 
+                       (round (float (* 100 (/ correct total))) 
+                       :total total 
+                       :pass correct 
+                       :fail (- total correct)))))
+  (:method ((net t-net) (training-frames array))
+    (evaluate-inference-1hs net (map 'list 'identity training-frames))))
   
 (defmethod network-error ((net t-net) (frames list))
   (loop 
@@ -661,9 +904,82 @@
 (defun type-1-csv-line->label-and-inputs (csv-line)
   (loop with word = nil
      for c across csv-line
-     if (char= c #\,) collect word into words and do (setf word nil)
+     if (char= c #\,) collect (reverse word) into words and do (setf word nil)
      else do (push c word)
-     finally (return (loop for chars in (reverse (cons word (reverse words)))
+     finally (return (loop for chars in (reverse (cons (reverse word) (reverse words)))
                         for first = t then nil
                         for string = (map 'string 'identity chars)
                         collect (if first string (read-from-string string))))))
+
+;; (defun test-mnist-0-1 ()
+;;   (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
+;;          (file-train (format nil "~a/~a" folder "mnist-0-1-train.csv"))
+;;          (file-test (format nil "~a/~a" folder "mnist-0-1-test.csv"))
+;;          (frames-train (normalize-set (type-1-file->set file-train)))
+;;          (frames-test (normalize-set (type-1-file->set file-test)))
+;;          (net (create-standard-net '(784 32 2) :id :test-1))
+;;          (start-time (get-internal-real-time)))
+;;     (train-frames net frames-train #'default-report-function #'default-report-frequency)
+;;     (list :time (/ (- (get-internal-real-time) start-time) 1000.0) 
+;;           :result (evaluate-inference-1hs net frames-test))))
+
+(defun test-mnist-0-1-c ()
+  (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
+         (file-train (format nil "~a/~a" folder "mnist-0-1-train.csv"))
+         (file-test (format nil "~a/~a" folder "mnist-0-1-test.csv"))
+         (frames-train (normalize-set (type-1-file->set file-train)))
+         (frames-test (normalize-set (type-1-file->set file-test)))
+         (net (create-standard-net '(784 32 2) :id :test-1))
+         (start-time (get-internal-real-time)))
+    (train-frames-c net frames-train #'default-report-function #'default-report-frequency)
+    (list :time (/ (- (get-internal-real-time) start-time) 1000.0) 
+          :result (evaluate-inference-1hs net frames-test))))
+
+;; (defun test-mnist-0-1-d ()
+;;   (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
+;;          (file-train (format nil "~a/~a" folder "mnist-0-1-train.csv"))
+;;          (file-test (format nil "~a/~a" folder "mnist-0-1-test.csv"))
+;;          (frames-train (normalize-set (type-1-file->set file-train)))
+;;          (frames-test (normalize-set (type-1-file->set file-test)))
+;;          (net (create-standard-net '(784 32 2) :id :test-1))
+;;          (start-time (get-internal-real-time)))
+;;     (train-frames-d net frames-train #'default-report-function #'default-report-frequency)
+;;     (list :time (/ (- (get-internal-real-time) start-time) 1000.0) 
+;;           :result (evaluate-inference-1hs net frames-test))))
+
+(defparameter *frames-train* nil)
+(defparameter *frames-test* nil)
+(defparameter *net* nil)
+
+(defun test-1-setup ()
+  (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
+         (file-train (format nil "~a/~a" folder "mnist-0-1-train.csv"))
+         (file-test (format nil "~a/~a" folder "mnist-0-1-test.csv")))
+    (setf *frames-train* (normalize-set (type-1-file->set file-train)))
+    (setf *frames-test* (normalize-set (type-1-file->set file-test)))
+    (setf *net* (create-standard-net '(784 32 2) :id :test-1))))
+
+(defun test-1-infer-d ()
+  (start-thread-pool 8)
+  (let ((result (infer-frame-d *net* (car (car *frames-test*)))))
+    (stop-thread-pool)
+    result))
+
+(defun test-1-infer ()
+  (infer-frame *net* (car (car *frames-test*))))
+
+(defun test-mnist-0-1-d ()
+  (start-thread-pool 1)
+  (let ((start-time (get-internal-real-time)))
+    (randomize-weights *net*)
+    (train-frames-d *net* *frames-train* #'default-report-function #'default-report-frequency)
+    (stop-thread-pool)
+    (list :time (/ (- (get-internal-real-time) start-time) 1000.0) 
+          :result (evaluate-inference-1hs *net* *frames-test*))))
+
+(defun test-mnist-0-1 ()
+  (let* ((start-time (get-internal-real-time)))
+    (randomize-weights *net*)
+    (train-frames *net* *frames-train* #'default-report-function #'default-report-frequency)
+    (list :time (/ (- (get-internal-real-time) start-time) 1000.0) 
+          :result (evaluate-inference-1hs *net* *frames-test*))))

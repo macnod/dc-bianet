@@ -1,7 +1,7 @@
 ;;;; dc-bianet-package.lisp
 
 (defpackage :dc-bianet
-  (:use :cl :dc-dlist :cl-ppcre)
+  (:use :cl :sb-thread :sb-concurrency :dc-dlist :cl-ppcre)
 
   (:export 
    make-random-weight-fn
