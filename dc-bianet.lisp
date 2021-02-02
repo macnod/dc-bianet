@@ -428,25 +428,28 @@
   (backpropagate net))
 
 (defmethod train-frames ((net t-net)
-                           (training-frames list)
+                           (training-frames vector)
                            (report-function function)
                            (report-frequency function))
-  (loop with start-time = (get-universal-time) and last-report-time = -1
-     for (inputs expected-outputs) in training-frames
+  (loop with start-time = (get-universal-time)
+     with last-report-time = start-time
+     with indexes = (shuffle (loop for a from 0 below (length training-frames) collect a))
+     for index in indexes
+     for (inputs expected-outputs) = (aref training-frames index)
      for count = 1 then (1+ count)
      for elapsed-seconds = (- (get-universal-time) start-time)
+     for since-last-report = (- (get-universal-time) last-report-time)
      do (train-frame net inputs expected-outputs)
-     when (and (not (= elapsed-seconds last-report-time))
-               (funcall report-frequency count elapsed-seconds))
-     do (funcall report-function 
+     when (funcall report-frequency count elapsed-seconds since-last-report)
+     do (funcall report-function
                  count 
-                 elapsed-seconds 
+                 elapsed-seconds
                  (collect-output-errors net))
-       (setf last-report-time elapsed-seconds)))
+       (setf last-report-time (get-universal-time))))
 
-(defun default-report-frequency (count elapsed-seconds)
+(defun default-report-frequency (count elapsed-seconds since-last-report)
   (declare (ignore count elapsed-seconds))
-  t)
+  (>= since-last-report 10))
 
 (defun default-report-function (count elapsed-seconds output-errors)
   (declare (ignore output-errors))
@@ -810,9 +813,19 @@
   (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
          (file-train (format nil "~a/~a" folder "mnist-0-1-train.csv"))
          (file-test (format nil "~a/~a" folder "mnist-0-1-test.csv")))
-    (setf *frames-train* (normalize-set (type-1-file->set file-train)))
+    (setf *frames-train* (map 'vector 'identity 
+                              (normalize-set (type-1-file->set file-train))))
     (setf *frames-test* (normalize-set (type-1-file->set file-test)))
-    (setf *net* (create-standard-net '(784 32 2) :id :test-1))))
+    (setf *net* (create-standard-net '(784 16 2) :id :test-1))))
+
+(defun test-2-setup ()
+  (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
+         (file-train (format nil "~a/~a" folder "mnist-train.csv"))
+         (file-test (format nil "~a/~a" folder "mnist-test.csv")))
+    (setf *frames-train* (map 'vector 'identity
+                              (normalize-set (type-1-file->set file-train))))
+    (setf *frames-test* (normalize-set (type-1-file->set file-test)))
+    (setf *net* (create-standard-net '(784 64 10) :id :test-1))))
 
 (defun test-1-infer-d ()
   (start-thread-pool 8)
@@ -823,11 +836,38 @@
 (defun test-1-infer ()
   (infer-frame *net* (car (car *frames-test*))))
 
-(defun test-mnist-0-1 ()
-  (start-thread-pool 8)
-  (let ((start-time (get-internal-real-time)))
-    (randomize-weights *net*)
-    (train-frames *net* *frames-train* #'default-report-function #'default-report-frequency)
-    (stop-thread-pool)
-    (list :time (/ (- (get-internal-real-time) start-time) 1000.0) 
-          :result (evaluate-inference-1hs *net* *frames-test*))))
+(defun test-train (&optional (epochs 1))
+  (loop initially 
+       (start-thread-pool 8)
+       (randomize-weights *net*)
+     with error-set = (loop for a = 0 then (1+ a)
+                         for frame across *frames-train*
+                         when (zerop (mod a 5))
+                         collect frame)
+     with start-time = (get-internal-real-time)
+     for epoch = 0 then (1+ epoch)
+     for network-error = (network-error *net* error-set)
+     while (and (< epoch epochs) (> network-error 0.05))
+     do 
+       (train-frames *net* *frames-train* 
+                     #'default-report-function 
+                     #'default-report-frequency)
+     finally
+       (stop-thread-pool)
+       (return (list :time (/ (- (get-internal-real-time) start-time) 1000.0)
+                     :network-error network-error
+                     :result (evaluate-inference-1hs *net* *frames-test*)))))
+
+
+(defun shuffle (seq)
+  "Return a sequence with the same elements as the given sequence S, but in random order (shuffled)."
+  (loop
+     with l = (length seq) 
+     with w = (make-array l :initial-contents seq)
+     for i from 0 below l 
+     for r = (random l) 
+     for h = (aref w i)
+     do 
+       (setf (aref w i) (aref w r)) 
+       (setf (aref w r) h)
+     finally (return (if (listp seq) (map 'list 'identity w) w))))
