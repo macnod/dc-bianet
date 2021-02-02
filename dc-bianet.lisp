@@ -14,16 +14,18 @@
 (defparameter *thread-pool* nil)
 (defparameter *jobs-run* nil) ;; Instance of dlist
 (defparameter *target-input-impact-mutex* (make-mutex :name "target-input-impact"))
+(defparameter *gates* nil)
 
 (defun thread-work ()
   (loop while *thread-pool-running*
      for job = (when *job-queue* (pop-tail *job-queue*))
-     if job do 
-       (funcall (second job))
-       (push-tail *jobs-run* (first job))
-       (with-mutex (*job-counter-mutex*)
-         (incf *job-counter*))
-     do (sleep 0.01)))
+     do (case (car job)
+          ((:fire :backprop)
+           (funcall (second job))
+           (push-tail *jobs-run* (first job))
+           (with-mutex (*job-counter-mutex*) (incf *job-counter*)))
+          (:open-gate 
+           (open-gate (elt *gates* (second job)))))))
 
 (defun start-thread-pool (thread-count)
   (setf *thread-pool-running* t)
@@ -40,7 +42,9 @@
 
 (defun stop-thread-pool ()
   (setf *thread-pool-running* nil)
-  (loop for thread in *thread-pool* do (join-thread thread)))
+  (when *thread-pool*
+    (loop for thread in *thread-pool* do (join-thread thread))
+    *thread-pool* nil))
 
 (defun make-random-weight-fn (&key (min 0.0) (max 1.0))
   (lambda (rstate &key
@@ -117,7 +121,8 @@
    (momentum :accessor momentum :initarg :momentum :initform 0.1)
    (delta :accessor delta :initarg :delta :initform 0.0)
    (limiter :accessor limiter :initarg :limiter
-            :initform (make-limiter))))
+            :initform (make-limiter))
+   (weight-mtx :reader weight-mtx :initform (make-mutex))))
 
 (defclass t-neuron ()
   ((id :accessor id :initarg :id :type keyword :initform (bianet-id))
@@ -135,7 +140,11 @@
    (x-coor :accessor x-coor :type real :initform 0.0)
    (y-coor :accessor y-coor :type real :initform 0.0)
    (z-coor :accessor z-coor :type real :initform 0.0)
-   (cx-dlist :accessor cx-dlist :type dlist :initform (make-instance 'dlist))))
+   (cx-dlist :accessor cx-dlist :type dlist :initform (make-instance 'dlist))
+   (input-mtx :reader input-mtx :initform (make-mutex))
+   (output-mtx :reader output-mtx :initform (make-mutex))
+   (err-mtx :reader err-mtx :initform (make-mutex))
+   (err-der-mtx :reader err-der-mtx :initform (make-mutex))))
 
 (defmethod initialize-instance :after ((neuron t-neuron) &key)
   (when (not (name neuron))
@@ -152,9 +161,12 @@
   (let* ((input (input neuron))
          (output (funcall (transfer-function neuron) input))
          (biased (biased neuron)))
-    (setf (output neuron) output
-          (input neuron) (if (not biased) 0.0 input)
-          (err neuron) nil)))
+    (with-mutex ((output-mtx neuron))
+      (setf (output neuron) output))
+    (with-mutex ((input-mtx neuron))
+      (setf (input neuron) (if (not biased) 0.0 input)))
+    (with-mutex ((err-mtx neuron))
+      (setf (err neuron) nil))))
 
 (defclass t-net ()
   ((id :reader id :initarg :id :type keyword :initform (bianet-id))
@@ -166,16 +178,25 @@
 (defgeneric feedforward (thing)
 
   (:method ((net t-net))
-    (loop 
+    (loop
        for layer-node = (head (layer-dlist net)) then (next layer-node)
        while layer-node
-       do (feedforward (value layer-node))))
+       for layer-index = 0 then (1+ layer-index)
+       for gate = (elt *gates* layer-index) 
+       do 
+         (close-gate gate)
+         (feedforward (value layer-node))
+         (push-head *job-queue* (list :open-gate layer-index))
+         (wait-on-gate gate)))
 
   (:method ((layer dlist))
     (loop 
        for neuron-node = (head layer) then (next neuron-node)
        while neuron-node
-       do (feedforward (value neuron-node))))
+       do (push-head *job-queue* 
+                     (list :fire
+                           (let ((neuron (value neuron-node)))
+                             (lambda () (feedforward neuron)))))))
 
   (:method ((neuron t-neuron))
     (loop initially (transfer neuron)
@@ -184,8 +205,31 @@
        do (feedforward (value cx-node))))
 
   (:method ((cx t-cx))
-    (incf (input (target cx)) 
-          (* (weight cx) (output (source cx))))))
+    (let ((target-input-impact (* (weight cx) (output (source cx))))
+          (target-neuron (target cx)))
+      (with-mutex ((input-mtx target-neuron))
+        (incf (input target-neuron) target-input-impact)))))
+
+(defgeneric backpropagate (thing)
+
+  (:method ((net t-net))
+    (loop
+       for layer-node = (tail (layer-dlist net)) then (prev layer-node)
+       while layer-node
+       do (backpropagate (value layer-node))))
+
+  (:method ((layer dlist))
+    (loop
+       for neuron-node = (tail layer) then (prev neuron-node)
+       while neuron-node 
+       do (push-head *job-queue* 
+                     (list :backprop
+                           (let ((neuron (value neuron-node)))
+                             (lambda () (backpropagate neuron)))))))
+
+  (:method ((neuron t-neuron))
+    (compute-neuron-error neuron)
+    (adjust-neuron-cx-weights neuron)))
 
 (defgeneric backpropagate (thing)
   (:method ((net t-net))
@@ -202,106 +246,9 @@
   (:method ((neuron t-neuron))
     (compute-neuron-error neuron)
     (adjust-neuron-cx-weights neuron)))
-
-(defgeneric feedforward-c (thing)
-
-  (:method ((net t-net))
-    (loop 
-       for layer-node = (head (layer-dlist net)) then (next layer-node)
-       while layer-node
-       do (feedforward-c (value layer-node))))
-
-  (:method ((layer dlist))
-    (loop 
-       for neuron-node = (head layer) then (next neuron-node)
-       while neuron-node
-       collect (make-thread 
-                (let ((neuron (value neuron-node)))
-                  (lambda () (feedforward-c (value neuron)))))
-       into threads
-       finally (loop for thread in threads do (join-thread thread))))
-
-  (:method ((neuron t-neuron))
-    (loop initially (transfer neuron)
-       for cx-node = (head (cx-dlist neuron)) then (next cx-node)
-       while cx-node
-       do (feedforward-c (value cx-node))))
-
-  (:method ((cx t-cx))
-    (incf (input (target cx)) 
-          (* (weight cx) (output (source cx))))))
-
-(defgeneric backpropagate-c (thing)
-  (:method ((net t-net))
-    (loop
-       for layer-node = (tail (layer-dlist net)) then (prev layer-node)
-       while layer-node
-       do (backpropagate-c (value layer-node))))
-
-  (:method ((layer dlist))
-    (loop
-       for neuron-node = (tail layer) then (prev neuron-node)
-       while neuron-node 
-       collect (make-thread (lambda () (backpropagate-c (value neuron-node))))
-       into threads
-       finally (loop for thread in threads do (join-thread thread))))
-
-  (:method ((neuron t-neuron))
-    (compute-neuron-error neuron)
-    (adjust-neuron-cx-weights neuron)))
-
-(defgeneric feedforward-d (thing)
-
-  (:method ((net t-net))
-    (loop 
-       for layer-node = (head (layer-dlist net)) then (next layer-node)
-       while layer-node
-       do (feedforward-d (value layer-node))))
-
-  (:method ((layer dlist))
-    (loop 
-       for neuron-node = (head layer) then (next neuron-node)
-       while neuron-node
-       do (push-head *job-queue* 
-                     (list :fire
-                           (let ((neuron (value neuron-node)))
-                             (lambda () (feedforward-d neuron)))))))
-  (:method ((neuron t-neuron))
-    (loop initially (transfer neuron)
-       for cx-node = (head (cx-dlist neuron)) then (next cx-node)
-       while cx-node
-       do (feedforward-d (value cx-node))))
-
-  (:method ((cx t-cx))
-    (let ((target-input-impact (* (weight cx) (output (source cx)))))
-      (with-mutex (*target-input-impact-mutex*)
-        (incf (input (target cx)) target-input-impact)))))
           
-
-(defgeneric backpropagate-d (thing)
-
-  (:method ((net t-net))
-    (loop
-       for layer-node = (tail (layer-dlist net)) then (prev layer-node)
-       while layer-node
-       do (backpropagate-d (value layer-node))))
-
-  (:method ((layer dlist))
-    (loop
-       for neuron-node = (tail layer) then (prev neuron-node)
-       while neuron-node 
-       do (push-head *job-queue* 
-                     (list :fire 
-                           (let ((neuron (value neuron-node)))
-                             (lambda () (backpropagate-d neuron)))))))
-
-  (:method ((neuron t-neuron))
-    (compute-neuron-error neuron)
-    (adjust-neuron-cx-weights neuron)))
-
 (defmethod compute-neuron-error ((neuron t-neuron))
-  (setf (err neuron)
-        (if (zerop (len (cx-dlist neuron)))
+  (let ((err (if (zerop (len (cx-dlist neuron)))
             ;; This is an output neuron (no outgoing connections)
             (- (expected-output neuron) (output neuron))
             ;; This is an input-layer or hidden-layer neuron;  we need 
@@ -311,10 +258,12 @@
                for cx-node = (head (cx-dlist neuron)) then (next cx-node)
                while cx-node
                for cx = (value cx-node)
-               summing (* (weight cx) (err-derivative (target cx))))))
-  (setf (err-derivative neuron)
-        (* (err neuron)
-           (funcall (transfer-derivative neuron) (output neuron)))))
+               summing (* (weight cx) (err-derivative (target cx)))))))
+    (with-mutex ((err-mtx neuron)) (setf (err neuron) err))
+    (with-mutex ((err-der-mtx neuron))
+      (setf (err-derivative neuron)
+            (* err (funcall (transfer-derivative neuron) (output neuron)))))))
+        
 
 (defmethod adjust-neuron-cx-weights ((neuron t-neuron))
     (loop
@@ -335,7 +284,8 @@
                    (err-derivative (target cx))
                    (output (source cx))))
          (new-weight (+ (weight cx) delta (* (momentum cx) (delta cx)))))
-    (setf (weight cx) new-weight)))
+    (with-mutex ((weight-mtx cx))
+      (setf (weight cx) new-weight))))
 
 (defmethod apply-inputs ((net t-net) (input-values list))
   (loop with input-layer-node = (head (layer-dlist net))
@@ -344,7 +294,8 @@
      while neuron-node
      for neuron = (value neuron-node)
      for input-value in input-values
-     do (setf (input neuron) input-value)))
+     do (with-mutex ((input-mtx neuron))
+          (setf (input neuron) input-value))))
 
 (defmethod apply-outputs ((net t-net) (output-values list))
   (loop with output-layer-node = (tail (layer-dlist net))
@@ -466,44 +417,20 @@
        for cx = (value cx-node)
        do (format t "    ~,4f -> ~a~%" (weight cx) (name (target cx))))))
 
-(defmethod infer-frame ((net t-net) (inputs list))
+(defmethod infer-frame-d ((net t-net) (inputs list))
   (apply-inputs net inputs)
   (feedforward net)
   (collect-outputs net))
 
-(defmethod infer-frame-c ((net t-net) (inputs list))
-  (apply-inputs net inputs)
-  (feedforward-c net)
-  (collect-outputs net))
-
-(defmethod infer-frame-d ((net t-net) (inputs list))
-  (apply-inputs net inputs)
-  (feedforward-d net)
-  (collect-outputs net))
-
 (defmethod train-frame ((net t-net) (inputs list) (expected-outputs list))
-  (infer-frame net inputs)
+  (infer-frame-d net inputs)
   (apply-expected-outputs net expected-outputs)
   (backpropagate net))
 
-(defmethod train-frame-c ((net t-net) (inputs list) (expected-outputs list))
-  (infer-frame-c net inputs)
-  (apply-expected-outputs net expected-outputs)
-  (backpropagate-c net))
-
-(defmethod train-frame-d ((net t-net) (inputs list) (expected-outputs list))
-  (infer-frame-d net inputs)
-  (apply-expected-outputs net expected-outputs)
-  (backpropagate-d net))
-
-(defgeneric infer-frames (net input-frames)
-  (:method ((net t-net) (input-frames list))
-    (loop for frame in input-frames collect (infer-frame net frame))))
-
-(defmethod train-frames ((net t-net) 
-                         (training-frames list)
-                         (report-function function)
-                         (report-frequency function))
+(defmethod train-frames ((net t-net)
+                           (training-frames list)
+                           (report-function function)
+                           (report-frequency function))
   (loop with start-time = (get-universal-time) and last-report-time = -1
      for (inputs expected-outputs) in training-frames
      for count = 1 then (1+ count)
@@ -516,49 +443,6 @@
                  elapsed-seconds 
                  (collect-output-errors net))
        (setf last-report-time elapsed-seconds)))
-
-(defmethod train-frames-c ((net t-net)
-                           (training-frames list)
-                           (report-function function)
-                           (report-frequency function))
-  (loop with start-time = (get-universal-time) and last-report-time = -1
-     for (inputs expected-outputs) in training-frames
-     for count = 1 then (1+ count)
-     for elapsed-seconds = (- (get-universal-time) start-time)
-     do (train-frame-c net inputs expected-outputs)
-     when (and (not (= elapsed-seconds last-report-time))
-               (funcall report-frequency count elapsed-seconds))
-     do (funcall report-function 
-                 count 
-                 elapsed-seconds 
-                 (collect-output-errors net))
-       (setf last-report-time elapsed-seconds)))
-
-(defmethod train-frames-d ((net t-net)
-                           (training-frames list)
-                           (report-function function)
-                           (report-frequency function))
-  (loop with start-time = (get-universal-time) and last-report-time = -1
-     for (inputs expected-outputs) in training-frames
-     for count = 1 then (1+ count)
-     for elapsed-seconds = (- (get-universal-time) start-time)
-     do (train-frame-d net inputs expected-outputs)
-     when (and (not (= elapsed-seconds last-report-time))
-               (funcall report-frequency count elapsed-seconds))
-     do (funcall report-function 
-                 count 
-                 elapsed-seconds 
-                 (collect-output-errors net))
-       (setf last-report-time elapsed-seconds)))
-
-(defmethod train-frames ((net t-net) 
-                         (training-frames array)
-                         (report-function function)
-                         (report-frequency function))
-  (train-frames net
-                (map 'list 'identity training-frames)
-                report-function
-                report-frequency))
 
 (defun default-report-frequency (count elapsed-seconds)
   (declare (ignore count elapsed-seconds))
@@ -694,7 +578,7 @@
        for correct = (if pass 1 0) then (if pass (1+ correct) correct)
        finally 
          (return (list :percent 
-                       (round (float (* 100 (/ correct total))) 
+                       (float (* 100 (/ correct total)))
                        :total total 
                        :pass correct 
                        :fail (- total correct)))))
@@ -778,9 +662,16 @@
                       :momentum momentum
                       :initial-weight-function weight-reset-function
                       :limiter limiter)
+       (create-gates net)
        (return net)))
                                
-    
+(defmethod create-gates ((net t-net))
+  (setf *gates* 
+        (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
+           while layer-node
+           for layer-index = 0 then (1+ layer-index)
+           for gate-name = (format nil "~(~a-~d~)" (id net) layer-index)
+           collecting (make-gate :name gate-name))))
 
 (defmethod name-neurons ((net t-net))
   (loop with global-index = 0
@@ -911,42 +802,6 @@
                         for string = (map 'string 'identity chars)
                         collect (if first string (read-from-string string))))))
 
-;; (defun test-mnist-0-1 ()
-;;   (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
-;;          (file-train (format nil "~a/~a" folder "mnist-0-1-train.csv"))
-;;          (file-test (format nil "~a/~a" folder "mnist-0-1-test.csv"))
-;;          (frames-train (normalize-set (type-1-file->set file-train)))
-;;          (frames-test (normalize-set (type-1-file->set file-test)))
-;;          (net (create-standard-net '(784 32 2) :id :test-1))
-;;          (start-time (get-internal-real-time)))
-;;     (train-frames net frames-train #'default-report-function #'default-report-frequency)
-;;     (list :time (/ (- (get-internal-real-time) start-time) 1000.0) 
-;;           :result (evaluate-inference-1hs net frames-test))))
-
-(defun test-mnist-0-1-c ()
-  (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
-         (file-train (format nil "~a/~a" folder "mnist-0-1-train.csv"))
-         (file-test (format nil "~a/~a" folder "mnist-0-1-test.csv"))
-         (frames-train (normalize-set (type-1-file->set file-train)))
-         (frames-test (normalize-set (type-1-file->set file-test)))
-         (net (create-standard-net '(784 32 2) :id :test-1))
-         (start-time (get-internal-real-time)))
-    (train-frames-c net frames-train #'default-report-function #'default-report-frequency)
-    (list :time (/ (- (get-internal-real-time) start-time) 1000.0) 
-          :result (evaluate-inference-1hs net frames-test))))
-
-;; (defun test-mnist-0-1-d ()
-;;   (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
-;;          (file-train (format nil "~a/~a" folder "mnist-0-1-train.csv"))
-;;          (file-test (format nil "~a/~a" folder "mnist-0-1-test.csv"))
-;;          (frames-train (normalize-set (type-1-file->set file-train)))
-;;          (frames-test (normalize-set (type-1-file->set file-test)))
-;;          (net (create-standard-net '(784 32 2) :id :test-1))
-;;          (start-time (get-internal-real-time)))
-;;     (train-frames-d net frames-train #'default-report-function #'default-report-frequency)
-;;     (list :time (/ (- (get-internal-real-time) start-time) 1000.0) 
-;;           :result (evaluate-inference-1hs net frames-test))))
-
 (defparameter *frames-train* nil)
 (defparameter *frames-test* nil)
 (defparameter *net* nil)
@@ -968,18 +823,11 @@
 (defun test-1-infer ()
   (infer-frame *net* (car (car *frames-test*))))
 
-(defun test-mnist-0-1-d ()
-  (start-thread-pool 1)
+(defun test-mnist-0-1 ()
+  (start-thread-pool 8)
   (let ((start-time (get-internal-real-time)))
     (randomize-weights *net*)
-    (train-frames-d *net* *frames-train* #'default-report-function #'default-report-frequency)
-    (stop-thread-pool)
-    (list :time (/ (- (get-internal-real-time) start-time) 1000.0) 
-          :result (evaluate-inference-1hs *net* *frames-test*))))
-
-(defun test-mnist-0-1 ()
-  (let* ((start-time (get-internal-real-time)))
-    (randomize-weights *net*)
     (train-frames *net* *frames-train* #'default-report-function #'default-report-frequency)
+    (stop-thread-pool)
     (list :time (/ (- (get-internal-real-time) start-time) 1000.0) 
           :result (evaluate-inference-1hs *net* *frames-test*))))
