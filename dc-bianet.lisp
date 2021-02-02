@@ -417,13 +417,13 @@
        for cx = (value cx-node)
        do (format t "    ~,4f -> ~a~%" (weight cx) (name (target cx))))))
 
-(defmethod infer-frame-d ((net t-net) (inputs list))
+(defmethod infer-frame ((net t-net) (inputs list))
   (apply-inputs net inputs)
   (feedforward net)
   (collect-outputs net))
 
 (defmethod train-frame ((net t-net) (inputs list) (expected-outputs list))
-  (infer-frame-d net inputs)
+  (infer-frame net inputs)
   (apply-expected-outputs net expected-outputs)
   (backpropagate net))
 
@@ -829,7 +829,7 @@
 
 (defun test-1-infer-d ()
   (start-thread-pool 8)
-  (let ((result (infer-frame-d *net* (car (car *frames-test*)))))
+  (let ((result (infer-frame *net* (car (car *frames-test*)))))
     (stop-thread-pool)
     result))
 
