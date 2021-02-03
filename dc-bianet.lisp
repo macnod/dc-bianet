@@ -566,7 +566,8 @@
 
 (defgeneric evaluate-inference-1hs (net training-frames)
   (:method ((net t-net) (training-frames list))
-    (loop 
+    (loop with own-threads = (not *thread-pool-running*)
+       initially (when own-threads (start-thread-pool 8))
        for (inputs expected-outputs) in training-frames
        for index = 0 then (1+ index)
        for expected-winner = (index-of-max expected-outputs)
@@ -576,6 +577,7 @@
        for pass = (= winner expected-winner)
        for correct = (if pass 1 0) then (if pass (1+ correct) correct)
        finally 
+         (when own-threads (stop-thread-pool))
          (return (list :percent 
                        (float (* 100 (/ correct total)))
                        :total total 
@@ -812,7 +814,7 @@
     (setf *frames-train* (map 'vector 'identity 
                               (normalize-set (type-1-file->set file-train))))
     (setf *frames-test* (normalize-set (type-1-file->set file-test)))
-    (setf *net* (create-standard-net '(784 16 2) :id :test-1))))
+    (setf *net* (create-standard-net '(784 128 64 16 2) :id :test-1))))
 
 (defun test-2-setup ()
   (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
@@ -831,12 +833,11 @@
                                       :epochs epochs 
                                       :target-error 0.05 
                                       :randomize-weights randomize-weights))
-         (stop-time (get-internal-real-time))
-         (result (list :time (/ (- stop-time start-time) 1000.0)
-                       :network-error network-error
-                       :result (evaluate-inference-1hs *net* *frames-test*))))
+         (stop-time (get-internal-real-time)))
     (stop-thread-pool)
-    result))
+    (list :time (/ (- stop-time start-time) 1000.0)
+          :network-error network-error
+          :result (evaluate-inference-1hs *net* *frames-test*))))
 
 (defun shuffle (seq)
   "Return a sequence with the same elements as the given sequence S, but in random order (shuffled)."
