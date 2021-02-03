@@ -843,15 +843,6 @@
     (setf *frames-test* (normalize-set (type-1-file->set file-test)))
     (setf *net* (create-standard-net '(784 128 10) :id :test-1))))
 
-(defun test-1-infer-d ()
-  (start-thread-pool 8)
-  (let ((result (infer-frame *net* (car (car *frames-test*)))))
-    (stop-thread-pool)
-    result))
-
-(defun test-1-infer ()
-  (infer-frame *net* (car (car *frames-test*))))
-
 (defun test-train (&key (epochs 6) (thread-count 8) (randomize-weights t))
   (stop-thread-pool)
   (start-thread-pool thread-count)
