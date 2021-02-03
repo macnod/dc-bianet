@@ -427,33 +427,49 @@
   (apply-expected-outputs net expected-outputs)
   (backpropagate net))
 
-(defmethod train-frames ((net t-net)
-                           (training-frames vector)
-                           (report-function function)
-                           (report-frequency function))
-  (loop with start-time = (get-universal-time)
+(defun train-frames (net training-frames 
+                     &key
+                       (epochs 6)
+                       (target-error 0.05)
+                       (randomize-weights t)
+                       (report-function #'default-report-function)
+                       (report-frequency #'default-report-frequency))
+  (when randomize-weights (randomize-weights net))
+  (loop 
+     with start-time = (get-universal-time)
      with last-report-time = start-time
-     with indexes = (shuffle (loop for a from 0 below (length training-frames) collect a))
-     for index in indexes
-     for (inputs expected-outputs) = (aref training-frames index)
-     for count = 1 then (1+ count)
-     for elapsed-seconds = (- (get-universal-time) start-time)
-     for since-last-report = (- (get-universal-time) last-report-time)
-     do (train-frame net inputs expected-outputs)
-     when (funcall report-frequency count elapsed-seconds since-last-report)
-     do (funcall report-function
-                 count 
-                 elapsed-seconds
-                 (collect-output-errors net))
-       (setf last-report-time (get-universal-time))))
+     with error-set-count = (cond ((> (length training-frames) 10000)
+                                      (truncate (* (length training-frames) 0.1)))
+                                     ((> (length training-frames) 1000)
+                                      1000)
+                                     (t (length training-frames)))
+     with error-set = (choose-from-vector training-frames error-set-count)
+     for indexes = (shuffle (loop for a from 0 below (length training-frames) collect a))
+     for epoch from 1 to epochs
+     for network-error = (network-error *net* error-set)
+     while (> network-error target-error)
+     do (loop 
+           for index in indexes
+           for (inputs expected-outputs) = (aref training-frames index)
+           for count = 1 then (1+ count)
+           for elapsed-seconds = (- (get-universal-time) start-time)
+           for since-last-report = (- (get-universal-time) last-report-time)
+           do (train-frame net inputs expected-outputs)
+           when (funcall report-frequency count elapsed-seconds since-last-report)
+           do (funcall report-function
+                       count 
+                       elapsed-seconds
+                       (network-error *net* error-set))
+             (setf last-report-time (get-universal-time)))
+     finally (return network-error)))
 
 (defun default-report-frequency (count elapsed-seconds since-last-report)
   (declare (ignore count elapsed-seconds))
   (>= since-last-report 10))
 
-(defun default-report-function (count elapsed-seconds output-errors)
-  (declare (ignore output-errors))
-  (format t "elapsed=~d; processed=~d;~%" elapsed-seconds count))
+(defun default-report-function (count elapsed-seconds network-error)
+  (format t "elapsed=~d; processed=~d; error=~d~%" 
+          elapsed-seconds count network-error))
 
 (defgeneric normalize-set (set)
   (:method ((set list))
@@ -825,7 +841,7 @@
     (setf *frames-train* (map 'vector 'identity
                               (normalize-set (type-1-file->set file-train))))
     (setf *frames-test* (normalize-set (type-1-file->set file-test)))
-    (setf *net* (create-standard-net '(784 64 10) :id :test-1))))
+    (setf *net* (create-standard-net '(784 128 10) :id :test-1))))
 
 (defun test-1-infer-d ()
   (start-thread-pool 8)
@@ -836,28 +852,19 @@
 (defun test-1-infer ()
   (infer-frame *net* (car (car *frames-test*))))
 
-(defun test-train (&optional (epochs 1))
-  (loop initially 
-       (start-thread-pool 8)
-       (randomize-weights *net*)
-     with error-set = (loop for a = 0 then (1+ a)
-                         for frame across *frames-train*
-                         when (zerop (mod a 5))
-                         collect frame)
-     with start-time = (get-internal-real-time)
-     for epoch = 0 then (1+ epoch)
-     for network-error = (network-error *net* error-set)
-     while (and (< epoch epochs) (> network-error 0.05))
-     do 
-       (train-frames *net* *frames-train* 
-                     #'default-report-function 
-                     #'default-report-frequency)
-     finally
-       (stop-thread-pool)
-       (return (list :time (/ (- (get-internal-real-time) start-time) 1000.0)
-                     :network-error network-error
-                     :result (evaluate-inference-1hs *net* *frames-test*)))))
-
+(defun test-train (&key (epochs 6) (thread-count 8) (randomize-weights t))
+  (stop-thread-pool)
+  (start-thread-pool thread-count)
+  (let ((start-time (get-internal-real-time))
+        (network-error (train-frames *net* *frames-train* 
+                                     :epochs epochs 
+                                     :target-error 0.05 
+                                     :randomize-weights randomize-weights))
+        (stop-time (get-internal-real-time)))
+    (stop-thread-pool)
+    (list :time (/ (- stop-time start-time) 1000.0)
+          :network-error network-error
+          :result (evaluate-inference-1hs *net* *frames-test*))))
 
 (defun shuffle (seq)
   "Return a sequence with the same elements as the given sequence S, but in random order (shuffled)."
@@ -871,3 +878,13 @@
        (setf (aref w i) (aref w r)) 
        (setf (aref w r) h)
      finally (return (if (listp seq) (map 'list 'identity w) w))))
+
+(defun choose-from-vector (vector n)
+  (loop with h = (make-hash-table :test 'equal)
+     and l = (length vector)
+     for a from 1 to n
+     for b = (loop for c = (random l)
+                while (gethash c h)
+                finally (setf (gethash c h) t)
+                  (return c))
+     collect (elt vector b)))
