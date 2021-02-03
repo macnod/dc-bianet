@@ -499,26 +499,6 @@
   (loop for k being the hash-keys in hash-table using (hash-value v)
        collect (list k v)))
 
-;; Type-1 files are CSV files that have rows with one label at the
-;; beginning of the row, followed by input values.  You can determine
-;; the number of output neurons needed by counting the distinct labels
-;; present in the file.
-(defun train-on-type-1-file (net filename)
-  (let ((label-counts (type-1-file->label-counts filename)))
-    (with-open-file (file filename)
-      (loop with label-outputs = (label-outputs-hash
-                                   (label-counts->label-indexes label-counts))
-         for line = (read-line file nil)
-         for line-number = 1 then (1+ line-number)
-         while (and line (> (length line) 1))
-         for values = (split "," line)
-         for label = (car values)
-         for inputs = (mapcar #'read-from-string (cdr values))
-         for expected-outputs = (gethash label label-outputs)
-         do (train-frame net inputs expected-outputs)
-         when (zerop (mod line-number 100))
-         do (format t "processed ~d~%" line-number)))))
-
 (defun type-1-file->set (filename)
   (let* ((label-counts (type-1-file->label-counts filename))
          (label-outputs (label-outputs-hash 
@@ -601,7 +581,7 @@
                        :total total 
                        :pass correct 
                        :fail (- total correct)))))
-  (:method ((net t-net) (training-frames array))
+  (:method ((net t-net) (training-frames vector))
     (evaluate-inference-1hs net (map 'list 'identity training-frames))))
   
 (defmethod network-error ((net t-net) (frames list))
@@ -841,21 +821,22 @@
     (setf *frames-train* (map 'vector 'identity
                               (normalize-set (type-1-file->set file-train))))
     (setf *frames-test* (normalize-set (type-1-file->set file-test)))
-    (setf *net* (create-standard-net '(784 128 10) :id :test-1))))
+    (setf *net* (create-standard-net '(784 64 32 10) :id :test-1))))
 
 (defun test-train (&key (epochs 6) (thread-count 8) (randomize-weights t))
   (stop-thread-pool)
   (start-thread-pool thread-count)
-  (let ((start-time (get-internal-real-time))
-        (network-error (train-frames *net* *frames-train* 
-                                     :epochs epochs 
-                                     :target-error 0.05 
-                                     :randomize-weights randomize-weights))
-        (stop-time (get-internal-real-time)))
+  (let* ((start-time (get-internal-real-time))
+         (network-error (train-frames *net* *frames-train* 
+                                      :epochs epochs 
+                                      :target-error 0.05 
+                                      :randomize-weights randomize-weights))
+         (stop-time (get-internal-real-time))
+         (result (list :time (/ (- stop-time start-time) 1000.0)
+                       :network-error network-error
+                       :result (evaluate-inference-1hs *net* *frames-test*))))
     (stop-thread-pool)
-    (list :time (/ (- stop-time start-time) 1000.0)
-          :network-error network-error
-          :result (evaluate-inference-1hs *net* *frames-test*))))
+    result))
 
 (defun shuffle (seq)
   "Return a sequence with the same elements as the given sequence S, but in random order (shuffled)."
