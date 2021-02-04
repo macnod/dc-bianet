@@ -10,7 +10,6 @@
 (defparameter *thread-pool-running* nil)
 (defparameter *job-counter* 0)
 (defparameter *job-counter-mutex* (make-mutex :name "job-counter-mutex"))
-(defparameter *gate* (make-gate))
 (defparameter *thread-pool* nil)
 (defparameter *jobs-run* nil) ;; Instance of dlist
 (defparameter *target-input-impact-mutex* (make-mutex :name "target-input-impact"))
@@ -174,6 +173,11 @@
    (log-file :accessor log-file :initarg :log-file :type string)
    (stop-training :accessor stop-training :type boolean :initform nil)
    (rstate :reader rstate :initform (make-random-state))))
+
+(defmethod simple-topology ((net t-net))
+  (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
+     while layer-node
+     collect (len (value layer-node))))
 
 (defgeneric feedforward (thing)
 
@@ -367,12 +371,23 @@
        for cx = (value cx-node)
        collect (weight cx))))
 
+(defun collect-weights-into-file (thing filename)
+  (with-open-file (s-out filename :direction :output :if-exists :supersede)
+    (loop for weight in (collect-weights thing)
+       do (write-line (format nil "~f" weight) s-out))))
+
 (defgeneric apply-weights (thing weights)
   (:method ((net t-net) (weights list))
     (loop for cx in (collect-cxs net)
        for weight in weights
        do (setf (weight cx) weight
                 (delta cx) 0.0))))
+
+(defun apply-weights-from-file (thing filename)
+  (with-open-file (s-in filename)
+    (loop for cx in (collect-cxs thing)
+       for weight = (read s-in)
+       do (setf (weight cx) weight))))
 
 (defgeneric collect-cxs (thing)
   (:method ((net t-net))
