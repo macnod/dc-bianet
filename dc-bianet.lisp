@@ -6,44 +6,60 @@
 (defparameter *default-momentum* 0.1)
 (defparameter *default-min-weight* -0.9)
 (defparameter *default-max-weight* 0.9)
-(defparameter *job-queue* nil) ;; Instance of dlist
-(defparameter *thread-pool-running* nil)
+
+(defparameter *job-queue* nil) ;; mailbox
 (defparameter *job-counter* 0)
-(defparameter *job-counter-mutex* (make-mutex :name "job-counter-mutex"))
-(defparameter *thread-pool* nil)
-(defparameter *jobs-run* nil) ;; Instance of dlist
-(defparameter *target-input-impact-mutex* (make-mutex :name "target-input-impact"))
+(defparameter *job-counter-mutex* (make-mutex :name "job-counter"))
+(defparameter *thread-pool* nil) ;; A simple list
 (defparameter *gates* nil)
+(defparameter *training-in-progress* nil)
+(defparameter *training-in-progress-mutex* (make-mutex :name "training-in-progress"))
+
+(defparameter *frames-train* nil)
+(defparameter *frames-test* nil)
+(defparameter *net* nil)
 
 (defun thread-work ()
-  (loop while *thread-pool-running*
-     for job = (when *job-queue* (pop-tail *job-queue*))
-     do (case (car job)
+  (loop for (k v) = (receive-message *job-queue*)
+     do (case k
           ((:fire :backprop)
-           (funcall (second job))
-           (push-tail *jobs-run* (first job))
-           (with-mutex (*job-counter-mutex*) (incf *job-counter*)))
-          (:open-gate 
-           (open-gate (elt *gates* (second job)))))))
+           (funcall v)
+           (inc-job-count))
+          (:open-gate
+           (open-gate (elt *gates* v)))
+          (:stop
+           (send-message *job-queue* '(:stop nil))
+           (return)))))
+           
 
 (defun start-thread-pool (thread-count)
-  (setf *thread-pool-running* t)
-  (setf *job-queue* (make-instance 'dlist))
-  (setf *jobs-run* (make-instance 'dlist))
+  (stop-thread-pool)
+  (setf *job-queue* (make-mailbox :name "job-queue"))
   (setf *job-counter* 0)
   (setf *thread-pool*
         (loop for a from 1 to thread-count collect
              (make-thread #'thread-work :name "thread-work"))))
 
+(defun stop-thread-pool ()
+  (when *thread-pool*
+    (send-message *job-queue* '(:stop nil))
+    (loop for thread in *thread-pool* 
+       when (thread-alive-p thread)
+       do (join-thread thread))
+    (receive-pending-messages *job-queue*)
+    (setf *thread-pool* nil)))
+
+(defun terminate-thread-pool ()
+  (when *thread-pool*
+    (loop for thread in *thread-pool* do (terminate-thread thread))))
+
+(defun inc-job-count(&optional (n 1))
+  (with-mutex (*job-counter-mutex*)
+    (incf *job-counter* n)))
+
 (defun get-job-count ()
   (with-mutex (*job-counter-mutex*)
     *job-counter*))
-
-(defun stop-thread-pool ()
-  (setf *thread-pool-running* nil)
-  (when *thread-pool*
-    (loop for thread in *thread-pool* do (join-thread thread))
-    *thread-pool* nil))
 
 (defun make-random-weight-fn (&key (min 0.0) (max 1.0))
   (lambda (rstate &key
@@ -185,23 +201,23 @@
     (loop
        for layer-node = (head (layer-dlist net)) then (next layer-node)
        while layer-node
-       for layer-index = 0 then (1+ layer-index)
-       for gate = (elt *gates* layer-index) 
+       for layer-gate-index = 0 then (1+ layer-gate-index)
+       for layer-gate = (elt *gates* layer-gate-index)
        do 
-         (close-gate gate)
+         (close-gate layer-gate)
          (feedforward (value layer-node))
-         (push-head *job-queue* (list :open-gate layer-index))
-         (wait-on-gate gate)))
+         (send-message *job-queue* (list :open-gate layer-gate-index))
+         (wait-on-gate layer-gate)))
 
   (:method ((layer dlist))
     (loop 
        for neuron-node = (head layer) then (next neuron-node)
        while neuron-node
-       do (push-head *job-queue* 
-                     (list :fire
-                           (let ((neuron (value neuron-node)))
-                             (lambda () (feedforward neuron)))))))
-
+       do (send-message *job-queue* 
+                        (list :fire
+                              (let ((neuron (value neuron-node)))
+                                (lambda () (feedforward neuron)))))))
+  
   (:method ((neuron t-neuron))
     (loop initially (transfer neuron)
        for cx-node = (head (cx-dlist neuron)) then (next cx-node)
@@ -220,33 +236,23 @@
     (loop
        for layer-node = (tail (layer-dlist net)) then (prev layer-node)
        while layer-node
-       do (backpropagate (value layer-node))))
+       for layer-gate-index = 0 then (1+ layer-gate-index)
+       for layer-gate = (elt *gates* layer-gate-index)
+       do
+         (close-gate layer-gate)
+         (backpropagate (value layer-node))
+         (send-message *job-queue* (list :open-gate layer-gate-index))
+         (wait-on-gate layer-gate)))
 
   (:method ((layer dlist))
     (loop
        for neuron-node = (tail layer) then (prev neuron-node)
        while neuron-node 
-       do (push-head *job-queue* 
-                     (list :backprop
-                           (let ((neuron (value neuron-node)))
-                             (lambda () (backpropagate neuron)))))))
-
-  (:method ((neuron t-neuron))
-    (compute-neuron-error neuron)
-    (adjust-neuron-cx-weights neuron)))
-
-(defgeneric backpropagate (thing)
-  (:method ((net t-net))
-    (loop
-       for layer-node = (tail (layer-dlist net)) then (prev layer-node)
-       while layer-node
-       do (backpropagate (value layer-node))))
-
-  (:method ((layer dlist))
-    (loop
-       for neuron-node = (tail layer) then (prev neuron-node)
-       while neuron-node do (backpropagate (value neuron-node))))
-
+       do (send-message *job-queue* 
+                        (list :backprop
+                              (let ((neuron (value neuron-node)))
+                                (lambda () (backpropagate neuron)))))))
+  
   (:method ((neuron t-neuron))
     (compute-neuron-error neuron)
     (adjust-neuron-cx-weights neuron)))
@@ -442,49 +448,71 @@
   (apply-expected-outputs net expected-outputs)
   (backpropagate net))
 
-(defun train-frames (net training-frames 
+(defun set-training-in-progress (in-progress)
+  (with-mutex (*training-in-progress-mutex*)
+    (setf *training-in-progress* in-progress)))
+
+(defun get-training-in-progress ()
+  (with-mutex (*training-in-progress-mutex*)
+    *training-in-progress*))
+
+(defun train-frames (net training-frames
                      &key
                        (epochs 6)
                        (target-error 0.05)
                        (randomize-weights t)
                        (report-function #'default-report-function)
                        (report-frequency #'default-report-frequency))
+  (when (get-training-in-progress)
+    (error "Training is already in progress."))
+  (set-training-in-progress t)
   (when randomize-weights (randomize-weights net))
-  (loop 
-     with start-time = (get-universal-time)
-     with last-report-time = start-time
-     with error-set-count = (cond ((> (length training-frames) 10000)
-                                      (truncate (* (length training-frames) 0.1)))
-                                     ((> (length training-frames) 1000)
-                                      1000)
-                                     (t (length training-frames)))
-     with error-set = (choose-from-vector training-frames error-set-count)
-     for indexes = (shuffle (loop for a from 0 below (length training-frames) collect a))
-     for epoch from 1 to epochs
-     for network-error = (network-error *net* error-set)
-     while (> network-error target-error)
-     do (loop 
-           for index in indexes
-           for (inputs expected-outputs) = (aref training-frames index)
-           for count = 1 then (1+ count)
-           for elapsed-seconds = (- (get-universal-time) start-time)
-           for since-last-report = (- (get-universal-time) last-report-time)
-           do (train-frame net inputs expected-outputs)
-           when (funcall report-frequency count elapsed-seconds since-last-report)
-           do (funcall report-function
-                       count 
-                       elapsed-seconds
-                       (network-error *net* error-set))
-             (setf last-report-time (get-universal-time)))
-     finally (return network-error)))
+     (loop 
+        with start-time = (get-universal-time)
+        with last-report-time = start-time
+        with error-set-count = (error-subset-count training-frames)
+        with error-set = (choose-from-vector training-frames error-set-count)
+        for indexes = (shuffle (loop for a from 0 below (length training-frames)
+                                  collect a))
+        for epoch from 1 to epochs
+        for network-error = (network-error net error-set)
+        while (> network-error target-error)
+        do (loop 
+              for index in indexes
+              for (inputs expected-outputs) = (aref training-frames index)
+              for count = 1 then (1+ count)
+              for elapsed-seconds = (- (get-universal-time) start-time)
+              for since-last-report = (- (get-universal-time) last-report-time)
+              do (train-frame net inputs expected-outputs)
+              when (funcall report-frequency 
+                            count elapsed-seconds since-last-report)
+              do (funcall report-function
+                          (log-file net)
+                          count 
+                          elapsed-seconds
+                          (network-error net error-set))
+                (setf last-report-time (get-universal-time)))
+        finally
+          (set-training-in-progress nil)
+          (return network-error)))
+
+(defun error-subset-count (training-frames)
+  (let ((l (length training-frames)))
+    (cond ((> l 10000) (truncate (* l 0.1)))
+          ((> l 1000) 1000)
+          (t (length training-frames)))))
 
 (defun default-report-frequency (count elapsed-seconds since-last-report)
   (declare (ignore count elapsed-seconds))
   (>= since-last-report 10))
 
-(defun default-report-function (count elapsed-seconds network-error)
-  (format t "elapsed=~d; processed=~d; error=~d~%" 
-          elapsed-seconds count network-error))
+(defun default-report-function (log-file count elapsed-seconds network-error)
+  (with-open-file (log-stream log-file 
+                              :direction :output 
+                              :if-exists :append 
+                              :if-does-not-exist :create)
+    (format log-stream "elapsed=~d; processed=~d; error=~d~%" 
+            elapsed-seconds count network-error)))
 
 (defgeneric normalize-set (set)
   (:method ((set list))
@@ -581,7 +609,7 @@
 
 (defgeneric evaluate-inference-1hs (net training-frames)
   (:method ((net t-net) (training-frames list))
-    (loop with own-threads = (not *thread-pool-running*)
+    (loop with own-threads = (not *thread-pool*)
        initially (when own-threads (start-thread-pool 8))
        for (inputs expected-outputs) in training-frames
        for index = 0 then (1+ index)
@@ -683,11 +711,13 @@
                                
 (defmethod create-gates ((net t-net))
   (setf *gates* 
-        (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
-           while layer-node
-           for layer-index = 0 then (1+ layer-index)
-           for gate-name = (format nil "~(~a-~d~)" (id net) layer-index)
-           collecting (make-gate :name gate-name))))
+        (map 'vector 'identity
+             (loop 
+                for layer-node = (head (layer-dlist net)) then (next layer-node)
+                while layer-node
+                for layer-index = 0 then (1+ layer-index)
+                for gate-name = (format nil "~(~a-~d~)" (id net) layer-index)
+                collecting (make-gate :name gate-name)))))
 
 (defmethod name-neurons ((net t-net))
   (loop with global-index = 0
@@ -818,10 +848,6 @@
                         for string = (map 'string 'identity chars)
                         collect (if first string (read-from-string string))))))
 
-(defparameter *frames-train* nil)
-(defparameter *frames-test* nil)
-(defparameter *net* nil)
-
 (defun test-1-setup ()
   (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
          (file-train (format nil "~a/~a" folder "mnist-0-1-train.csv"))
@@ -829,7 +855,7 @@
     (setf *frames-train* (map 'vector 'identity 
                               (normalize-set (type-1-file->set file-train))))
     (setf *frames-test* (normalize-set (type-1-file->set file-test)))
-    (setf *net* (create-standard-net '(784 128 64 16 2) :id :test-1))))
+    (setf *net* (create-standard-net '(784 32 2) :id :test-1))))
 
 (defun test-2-setup ()
   (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
@@ -853,6 +879,10 @@
     (list :time (/ (- stop-time start-time) 1000.0)
           :network-error network-error
           :result (evaluate-inference-1hs *net* *frames-test*))))
+
+(defun test-train-clear ()
+  (stop-thread-pool)
+  (set-training-in-progress nil))
 
 (defun shuffle (seq)
   "Return a sequence with the same elements as the given sequence S, but in random order (shuffled)."
