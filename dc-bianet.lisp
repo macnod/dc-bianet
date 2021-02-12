@@ -12,8 +12,9 @@
 (defparameter *job-counter-mutex* (make-mutex :name "job-counter"))
 (defparameter *thread-pool* nil) ;; A simple list
 (defparameter *gates* nil)
-(defparameter *training-in-progress* nil)
+(defparameter *main-training-thread* nil)
 (defparameter *training-in-progress-mutex* (make-mutex :name "training-in-progress"))
+(defparameter *continue-training* nil)
 
 (defparameter *frames-train* nil)
 (defparameter *frames-test* nil)
@@ -30,7 +31,6 @@
           (:stop
            (send-message *job-queue* '(:stop nil))
            (return)))))
-           
 
 (defun start-thread-pool (thread-count)
   (stop-thread-pool)
@@ -62,15 +62,21 @@
     *job-counter*))
 
 (defun make-random-weight-fn (&key (min 0.0) (max 1.0))
-  (lambda (rstate &key
-                    layer-index
-                    source-index
-                    target-index
-                    global-source-index
-                    global-target-index)
-    (declare (ignore layer-index source-index target-index 
-                     global-source-index global-target-index))
+  (lambda (&key rstate
+             global-fraction
+             layer-fraction
+             neuron-fraction)
+    (declare (ignore global-fraction layer-fraction neuron-fraction))
     (+ min (random (- max min) rstate))))
+
+(defun make-progressive-weight-fn (&key (min 0.0) (max 1.0))
+  (lambda (&key rstate
+             global-fraction
+             layer-fraction
+             neuron-fraction)
+    (declare (ignore rstate global-fraction neuron-fraction))
+    (+ min (* layer-fraction (- max min)))))
+  
 
 (defun make-limiter (&key (magnitude *magnitude-limit*)
                        (precision *precision-limit*))
@@ -188,7 +194,10 @@
    (layer-dlist :accessor layer-dlist :type dlist :initform (make-instance 'dlist))
    (log-file :accessor log-file :initarg :log-file :type string)
    (stop-training :accessor stop-training :type boolean :initform nil)
-   (rstate :reader rstate :initform (make-random-state))))
+   (rstate :reader rstate :initform (make-random-state))
+   (initial-weight-function 
+    :accessor initial-weight-function
+    :initform (make-progressive-weight-fn :min -0.9 :max 0.9))))
 
 (defmethod simple-topology ((net t-net))
   (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
@@ -395,6 +404,36 @@
        for weight = (read s-in)
        do (setf (weight cx) weight))))
 
+(defun reset-weights (net)
+  (loop with global-index = 0 
+     and global-count = (length (collect-weights net))
+     for layer-node = (head (layer-dlist net)) then (next layer-node)
+     while layer-node
+     for layer = (value layer-node)
+     do (loop with layer-index = 0 
+           and layer-count = (length (collect-weights layer))
+           for neuron-node = (head layer) then (next neuron-node)
+           while neuron-node
+           for neuron = (value neuron-node)
+           do (loop with neuron-count = (length (collect-weights neuron))
+                 for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+                 while cx-node
+                 for cx = (value cx-node)
+                 for neuron-index = 0 then (1+ neuron-index)
+                 for weight = (funcall (initial-weight-function net)
+                                       :rstate (rstate net)
+                                       :global-fraction (/ (float global-index)
+                                                           (float global-count))
+                                       :layer-fraction (/ (float layer-index)
+                                                          (float layer-count))
+                                       :neuron-fraction (/ (float neuron-index)
+                                                           (float neuron-count)))
+                 do (with-mutex ((weight-mtx cx))
+                      (setf (weight cx) weight)
+                      (setf (delta cx) 0.0))
+                   (incf global-index)
+                   (incf layer-index)))))
+
 (defgeneric collect-cxs (thing)
   (:method ((net t-net))
     (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
@@ -448,53 +487,77 @@
   (apply-expected-outputs net expected-outputs)
   (backpropagate net))
 
-(defun set-training-in-progress (in-progress)
+(defun set-training-in-progress (thread)
   (with-mutex (*training-in-progress-mutex*)
-    (setf *training-in-progress* in-progress)))
+    (setf *main-training-thread* thread)))
 
 (defun get-training-in-progress ()
   (with-mutex (*training-in-progress-mutex*)
-    *training-in-progress*))
+    *main-training-thread*))
 
-(defun train-frames (net training-frames
+(defun train-frames (net training-frames when-complete
                      &key
                        (epochs 6)
                        (target-error 0.05)
-                       (randomize-weights t)
+                       (reset-weights t)
                        (report-function #'default-report-function)
                        (report-frequency #'default-report-frequency))
   (when (get-training-in-progress)
     (error "Training is already in progress."))
-  (set-training-in-progress t)
-  (when randomize-weights (randomize-weights net))
-     (loop 
-        with start-time = (get-universal-time)
-        with last-report-time = start-time
-        with error-set-count = (error-subset-count training-frames)
-        with error-set = (choose-from-vector training-frames error-set-count)
-        for indexes = (shuffle (loop for a from 0 below (length training-frames)
-                                  collect a))
-        for epoch from 1 to epochs
-        for network-error = (network-error net error-set)
-        while (> network-error target-error)
-        do (loop 
-              for index in indexes
-              for (inputs expected-outputs) = (aref training-frames index)
-              for count = 1 then (1+ count)
-              for elapsed-seconds = (- (get-universal-time) start-time)
-              for since-last-report = (- (get-universal-time) last-report-time)
-              do (train-frame net inputs expected-outputs)
-              when (funcall report-frequency 
-                            count elapsed-seconds since-last-report)
-              do (funcall report-function
-                          (log-file net)
-                          count 
-                          elapsed-seconds
-                          (network-error net error-set))
-                (setf last-report-time (get-universal-time)))
-        finally
-          (set-training-in-progress nil)
-          (return network-error)))
+  (set-training-in-progress
+   (make-thread
+    (lambda ()
+      (when reset-weights (reset-weights net))
+      (let ((result (train-frames-work net 
+                                       training-frames
+                                       epochs 
+                                       target-error 
+                                       report-function 
+                                       report-frequency)))
+        (funcall when-complete
+                 (getf result :start-time) 
+                 (getf result :network-error))))
+    :name "main-training-thread")))
+
+(defun train-frames-work (net
+                          training-frames
+                          epochs
+                          target-error
+                          report-function
+                          report-frequency)
+  (loop initially 
+       (setf *continue-training* t)
+     with start-time = (get-universal-time)
+     with last-report-time = start-time
+     with error-set-count = (error-subset-count training-frames)
+     with error-set = (choose-from-vector training-frames error-set-count)
+     for indexes = (shuffle (loop for a from 0 below (length training-frames)
+                               collect a))
+     for epoch from 1 to epochs
+     for network-error = (network-error net error-set)
+     while (and (> network-error target-error) *continue-training*)
+     do (loop 
+           for index in indexes
+           for (inputs expected-outputs) = (aref training-frames index)
+           for count = 1 then (1+ count)
+           for elapsed-seconds = (- (get-universal-time) start-time)
+           for since-last-report = (- (get-universal-time) last-report-time)
+           while *continue-training*
+           do (train-frame net inputs expected-outputs)
+           when (funcall report-frequency 
+                         count elapsed-seconds since-last-report)
+           do (funcall report-function
+                       (log-file net)
+                       count 
+                       elapsed-seconds
+                       (network-error net error-set))
+             (setf last-report-time (get-universal-time)))
+     finally (return (list :start-time start-time 
+                           :network-error network-error))))
+
+(defun stop-training-frames ()
+  (when (get-training-in-progress)
+    (setf *continue-training* nil)))
 
 (defun error-subset-count (training-frames)
   (let ((l (length training-frames)))
@@ -511,7 +574,7 @@
                               :direction :output 
                               :if-exists :append 
                               :if-does-not-exist :create)
-    (format log-stream "elapsed=~d; processed=~d; error=~d~%" 
+    (format log-stream "t=~ds; v=~d; e=~d~%" 
             elapsed-seconds count network-error)))
 
 (defgeneric normalize-set (set)
@@ -682,11 +745,12 @@
                               (id (bianet-id))
                               log-file
                               (weight-reset-function 
-                               (make-random-weight-fn :min -0.9 :max 0.9))
+                               (make-progressive-weight-fn :min -0.5 :max 0.5))
                               (limiter (make-limiter))
                               (momentum *default-momentum*)
                               (learning-rate *default-learning-rate*))
-  (loop with log = (or log-file (format nil "/tmp/~(~a~).log" id))
+  (loop
+     with log = (or log-file (format nil "/tmp/~(~a~).log" id))
      with net = (make-instance 't-net :id id :log-file log)
      with last-layer = (1- (length succinct-topology))
      for neuron-count in succinct-topology
@@ -700,12 +764,13 @@
                                :transfer-key transfer-key)
      do (push-tail (layer-dlist net) layer)
      finally
+       (setf (initial-weight-function net) weight-reset-function)
        (name-neurons net)
        (connect-fully net
                       :learning-rate learning-rate
                       :momentum momentum
-                      :initial-weight-function weight-reset-function
                       :limiter limiter)
+       (reset-weights net)
        (create-gates net)
        (return net)))
                                
@@ -739,74 +804,28 @@
 (defun connect-fully (net &key 
                             (learning-rate *default-learning-rate*)
                             (momentum *default-momentum*)
-                            (initial-weight-function 
-                             (make-random-weight-fn :min -0.9 :max 0.9))
                             (limiter (make-limiter)))
-  (loop with layer-count = (len (layer-dlist net)) 
-     and global-source-index = 0
-     and global-target-index = 0
-     for layer-node = (head (layer-dlist net)) then (next layer-node)
-     for layer-index = 1 then (1+ layer-index)
-     while (< layer-index layer-count)
+  (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
+     while (next layer-node)
      for layer = (value layer-node)
      for next-layer = (value (next layer-node))
      do (loop for source-node = (head layer) then (next source-node)
-           for source-index = 1 then (1+ source-index)
            while source-node do 
-             (incf global-source-index)
              (loop for target-node = (head next-layer) then (next target-node)
-                 for target-index = 0 then (1+ target-index)
-                 while target-node
-                 for source = (value source-node)
-                 for target = (value target-node)
-                 when (not (biased target))
-                 do
-                   (incf global-target-index)
-                   (push-tail 
-                     (cx-dlist source)
-                     (make-instance 
-                      't-cx 
-                      :source source 
-                      :target target
-                      :learning-rate learning-rate
-                      :momentum momentum
-                      :limiter limiter
-                      :weight (funcall 
-                               initial-weight-function
-                               (rstate net)
-                               :layer-index layer-index
-                               :source-index source-index
-                               :target-index target-index
-                               :global-source-index global-source-index
-                               :global-target-index global-target-index)))))))
-
-(defgeneric randomize-weights (thing &key min max)
-  (:method ((net t-net) &key min max)
-    (loop 
-       with a = (or min *default-min-weight*) 
-       and b = (or max *default-max-weight*)
-       for layer-node = (head (layer-dlist net)) then (next layer-node)
-       while layer-node
-       do (randomize-weights (value layer-node) :min a :max b)))
-  (:method ((layer dlist) &key min max)
-    (loop 
-       with a = (or min *default-min-weight*) 
-       and b = (or max *default-max-weight*)
-       for neuron-node = (head layer) then (next neuron-node)
-       while neuron-node
-       do (randomize-weights (value neuron-node) :min a :max b)))
-  (:method ((neuron t-neuron) &key min max)
-    (loop 
-       with a = (or min *default-min-weight*) 
-       and b = (or max *default-max-weight*)
-       for cx-node = (head (cx-dlist neuron)) then (next cx-node)
-       while cx-node
-       do (randomize-weights (value cx-node) :min a :max b)))
-  (:method ((cx t-cx) &key min max)
-    (let ((a (or min *default-min-weight*))
-          (b (or max *default-max-weight*)))
-      (setf (weight cx) (+ (random (- b a)) a)))))
-           
+                while target-node
+                for source = (value source-node)
+                for target = (value target-node)
+                when (not (biased target))
+                do
+                  (push-tail 
+                   (cx-dlist source)
+                   (make-instance 
+                    't-cx 
+                    :source source 
+                    :target target
+                    :learning-rate learning-rate
+                    :momentum momentum
+                    :limiter limiter))))))
 
 (defmethod circle-data-1hs ((net t-net) (count integer))
   (loop with true = 0.0 and false = 0.0 and state = (rstate net)
@@ -855,7 +874,9 @@
     (setf *frames-train* (map 'vector 'identity 
                               (normalize-set (type-1-file->set file-train))))
     (setf *frames-test* (normalize-set (type-1-file->set file-test)))
-    (setf *net* (create-standard-net '(784 32 2) :id :test-1))))
+    (setf *net* (create-standard-net '(784 10 2) :id :test-1
+                                     :weight-reset-function
+                                     (make-progressive-weight-fn :min -0.1 :max 0.1)))))
 
 (defun test-2-setup ()
   (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
@@ -864,21 +885,31 @@
     (setf *frames-train* (map 'vector 'identity
                               (normalize-set (type-1-file->set file-train))))
     (setf *frames-test* (normalize-set (type-1-file->set file-test)))
-    (setf *net* (create-standard-net '(784 64 32 10) :id :test-1))))
+    (setf *net* (create-standard-net '(784 64 10) :id :test-1
+                                     :weight-reset-function
+                                     (make-progressive-weight-fn :min -0.9 :max 0.9)))))
 
-(defun test-train (&key (epochs 6) (thread-count 8) (randomize-weights t))
+(defun test-train (&key (epochs 6) (thread-count 8) (reset-weights t))
   (stop-thread-pool)
   (start-thread-pool thread-count)
-  (let* ((start-time (get-internal-real-time))
-         (network-error (train-frames *net* *frames-train* 
-                                      :epochs epochs 
-                                      :target-error 0.05 
-                                      :randomize-weights randomize-weights))
-         (stop-time (get-internal-real-time)))
-    (stop-thread-pool)
-    (list :time (/ (- stop-time start-time) 1000.0)
-          :network-error network-error
-          :result (evaluate-inference-1hs *net* *frames-test*))))
+  (train-frames *net* *frames-train* #'test-train-complete
+                :epochs epochs 
+                :target-error 0.05 
+                :reset-weights reset-weights)
+  :training)
+
+(defun test-train-complete (start-time network-error)
+  (stop-thread-pool)
+  (set-training-in-progress nil)
+  (with-open-file (log-stream (log-file *net*)
+                              :direction :output
+                              :if-exists :append
+                              :if-does-not-exist :create)
+    (format log-stream "Done.  t=~ds; e=~f; r=~a~%"
+            (- (get-universal-time) start-time)
+            network-error
+            (evaluate-inference-1hs *net* *frames-test*))))
+  
 
 (defun test-train-clear ()
   (stop-thread-pool)
