@@ -23,13 +23,12 @@
 (defun thread-work ()
   (loop for (k v) = (receive-message *job-queue*)
      do (case k
-          ((:fire :backprop)
+          ((:fire :backprop) 
            (funcall v)
            (inc-job-count))
           (:open-gate
            (open-gate (elt *gates* v)))
           (:stop
-           (send-message *job-queue* '(:stop nil))
            (return)))))
 
 (defun start-thread-pool (thread-count)
@@ -42,7 +41,13 @@
 
 (defun stop-thread-pool ()
   (when *thread-pool*
-    (send-message *job-queue* '(:stop nil))
+    (loop 
+       for (k v) in (receive-pending-messages *job-queue*)
+       when (equal k :open-gate) 
+       do (send-message *job-queue* (list k v)))
+    (loop for thread in *thread-pool*
+       when (thread-alive-p thread)
+       do (send-message *job-queue* '(:stop nil)))
     (loop for thread in *thread-pool* 
        when (thread-alive-p thread)
        do (join-thread thread))
@@ -565,7 +570,8 @@
 
 (defun stop-training-frames ()
   (when (get-training-in-progress)
-    (setf *continue-training* nil)))
+    (setf *continue-training* nil)
+    (receive-pending-messages *job-queue*)
 
 (defun error-subset-count (training-frames)
   (let ((l (length training-frames)))
@@ -886,18 +892,19 @@
                                      :weight-reset-function
                                      (make-random-weight-fn :min -0.5 :max 0.5)))))
 
-(defun test-2-setup ()
+(defun test-2-setup (&optional (topology '(784 128 10)))
   (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
          (file-train (format nil "~a/~a" folder "mnist-train.csv"))
          (file-test (format nil "~a/~a" folder "mnist-test.csv")))
     (setf *frames-train* (map 'vector 'identity
                               (normalize-set (type-1-file->set file-train))))
     (setf *frames-test* (normalize-set (type-1-file->set file-test)))
-    (setf *net* (create-standard-net '(784 128 10) :id :test-1
+    (setf *net* (create-standard-net topology 
+                                     :id :test-1
                                      :weight-reset-function
                                      (make-random-weight-fn :min -0.5 :max 0.5)))))
 
-(defun test-train (&key (epochs 6) (thread-count 8) (reset-weights t))
+(defun test-train (&key (epochs 6) (thread-count 6) (reset-weights t))
   (stop-thread-pool)
   (start-thread-pool thread-count)
   (train-frames *net* *frames-train* #'test-train-complete
