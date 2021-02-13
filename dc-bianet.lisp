@@ -77,6 +77,13 @@
     (declare (ignore rstate global-fraction neuron-fraction))
     (+ min (* layer-fraction (- max min)))))
   
+(defun make-sinusoid-weight-fn (&key (min 0.0) (max 1.0))
+  (lambda (&key rstate
+             global-fraction
+             layer-fraction
+             neuron-fraction)
+    (declare (ignore rstate global-fraction layer-fraction))
+    (+ min (* (sin (* neuron-fraction 3.14159265)) (- max min)))))
 
 (defun make-limiter (&key (magnitude *magnitude-limit*)
                        (precision *precision-limit*))
@@ -545,9 +552,10 @@
            while *continue-training*
            do (train-frame net inputs expected-outputs)
            when (funcall report-frequency 
-                         count elapsed-seconds since-last-report)
+                         epoch count elapsed-seconds since-last-report)
            do (funcall report-function
                        (log-file net)
+                       epoch
                        count 
                        elapsed-seconds
                        (network-error net error-set))
@@ -565,17 +573,17 @@
           ((> l 1000) 1000)
           (t (length training-frames)))))
 
-(defun default-report-frequency (count elapsed-seconds since-last-report)
-  (declare (ignore count elapsed-seconds))
+(defun default-report-frequency (iteration count elapsed-seconds since-last-report)
+  (declare (ignore iteration count elapsed-seconds))
   (>= since-last-report 10))
 
-(defun default-report-function (log-file count elapsed-seconds network-error)
+(defun default-report-function (log-file iteration count elapsed-seconds network-error)
   (with-open-file (log-stream log-file 
                               :direction :output 
                               :if-exists :append 
                               :if-does-not-exist :create)
-    (format log-stream "t=~ds; v=~d; e=~d~%" 
-            elapsed-seconds count network-error)))
+    (format log-stream "t=~ds; i=~d; v=~d; e=~d~%" 
+            elapsed-seconds iteration count network-error)))
 
 (defgeneric normalize-set (set)
   (:method ((set list))
@@ -876,7 +884,7 @@
     (setf *frames-test* (normalize-set (type-1-file->set file-test)))
     (setf *net* (create-standard-net '(784 10 2) :id :test-1
                                      :weight-reset-function
-                                     (make-progressive-weight-fn :min -0.1 :max 0.1)))))
+                                     (make-random-weight-fn :min -0.5 :max 0.5)))))
 
 (defun test-2-setup ()
   (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
@@ -885,9 +893,9 @@
     (setf *frames-train* (map 'vector 'identity
                               (normalize-set (type-1-file->set file-train))))
     (setf *frames-test* (normalize-set (type-1-file->set file-test)))
-    (setf *net* (create-standard-net '(784 64 10) :id :test-1
+    (setf *net* (create-standard-net '(784 128 10) :id :test-1
                                      :weight-reset-function
-                                     (make-progressive-weight-fn :min -0.9 :max 0.9)))))
+                                     (make-random-weight-fn :min -0.5 :max 0.5)))))
 
 (defun test-train (&key (epochs 6) (thread-count 8) (reset-weights t))
   (stop-thread-pool)
