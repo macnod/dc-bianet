@@ -46,7 +46,6 @@
        when (equal k :open-gate) 
        do (send-message *job-queue* (list k v)))
     (loop for thread in *thread-pool*
-       when (thread-alive-p thread)
        do (send-message *job-queue* '(:stop nil)))
     (loop for thread in *thread-pool* 
        when (thread-alive-p thread)
@@ -204,12 +203,25 @@
 (defclass t-net ()
   ((id :reader id :initarg :id :type keyword :initform (bianet-id))
    (layer-dlist :accessor layer-dlist :type dlist :initform (make-instance 'dlist))
-   (log-file :accessor log-file :initarg :log-file :type string)
+   (log-file :accessor log-file :initarg :log-file :initform nil)
+   (weights-file :accessor weights-file :initarg :weights-file :initform nil)
    (stop-training :accessor stop-training :type boolean :initform nil)
    (rstate :reader rstate :initform (make-random-state))
    (initial-weight-function 
     :accessor initial-weight-function
     :initform (make-progressive-weight-fn :min -0.9 :max 0.9))))
+
+(defmethod default-log-file-name ((net t-net))
+  (format nil "~atmp/~(~a~)-~{~a~^-~}.log"
+          (user-homedir-pathname)
+          (id net)
+          (simple-topology net)))
+
+(defmethod default-weights-file-name ((net t-net))
+  (format nil "~atmp/~(~a~)-~{~a~^-~}-weights.dat"
+          (user-homedir-pathname)
+          (id net)
+          (simple-topology net)))
 
 (defmethod simple-topology ((net t-net))
   (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
@@ -398,7 +410,11 @@
        for cx = (value cx-node)
        collect (weight cx))))
 
-(defun collect-weights-into-file (thing filename)
+(defun collect-weights-into-file (thing &optional filename)
+  (when (and (null filename) (equal (type-of thing) 't-net))
+    (setf filename (weights-file thing)))
+  (when (null filename)
+    (error "For other than a t-net object, you must provide the filename"))
   (with-open-file (s-out filename :direction :output :if-exists :supersede)
     (loop for weight in (collect-weights thing)
        do (write-line (format nil "~f" weight) s-out))))
@@ -500,9 +516,17 @@
   (backpropagate net))
 
 (defun set-training-in-progress (thread)
-  (with-mutex (*training-in-progress-mutex*)
-    (setf *main-training-thread* thread)))
-
+  (if thread
+      (with-mutex (*training-in-progress-mutex*)
+        (setf *main-training-thread* thread))
+      (progn
+        (setf *continue-training* nil)
+        (sleep 1)
+        (setf *main-training-thread* nil)
+        (loop for thread in (list-all-threads)
+           when (equal (thread-name thread) "main-training-thread")
+           do (terminate-thread thread)))))
+  
 (defun get-training-in-progress ()
   (with-mutex (*training-in-progress-mutex*)
     *main-training-thread*))
@@ -516,6 +540,11 @@
                        (report-frequency #'default-report-frequency))
   (when (get-training-in-progress)
     (error "Training is already in progress."))
+  (with-open-file (stream (log-file net)
+                          :direction :output
+                          :if-does-not-exist :create
+                          :if-exists :append)
+    (format stream "~%BEGIN~%"))
   (set-training-in-progress
    (make-thread
     (lambda ()
@@ -541,6 +570,8 @@
        (setf *continue-training* t)
      with start-time = (get-universal-time)
      with last-report-time = start-time
+     with presentation = 0 
+     with last-presentation = 0
      with error-set-count = (error-subset-count training-frames)
      with error-set = (choose-from-vector training-frames error-set-count)
      for indexes = (shuffle (loop for a from 0 below (length training-frames)
@@ -556,40 +587,61 @@
            for since-last-report = (- (get-universal-time) last-report-time)
            while *continue-training*
            do (train-frame net inputs expected-outputs)
+             (incf presentation)
            when (funcall report-frequency 
-                         epoch count elapsed-seconds since-last-report)
+                         epoch count presentation last-presentation 
+                         elapsed-seconds since-last-report)
            do (funcall report-function
                        (log-file net)
-                       epoch
-                       count 
-                       elapsed-seconds
+                       epoch count presentation last-presentation
+                       elapsed-seconds since-last-report
                        (network-error net error-set))
-             (setf last-report-time (get-universal-time)))
+             (setf last-report-time (get-universal-time))
+             (setf last-presentation presentation))
      finally (return (list :start-time start-time 
                            :network-error network-error))))
 
-(defun stop-training-frames ()
+(defun stop-training-frames (net)
   (when (get-training-in-progress)
-    (setf *continue-training* nil)
-    (receive-pending-messages *job-queue*)
+    (stop-thread-pool)
+    (let ((message (format nil "END")))
+      (with-open-file (stream (log-file net)
+                              :direction :output
+                              :if-exists :append
+                              :if-does-not-exist :create)
+        (write-line message stream))
+      (format t message))
+    (sleep 1)
+    (set-training-in-progress nil)))
+
 
 (defun error-subset-count (training-frames)
   (let ((l (length training-frames)))
-    (cond ((> l 10000) (truncate (* l 0.1)))
-          ((> l 1000) 1000)
+    (cond ((> l 10000) (truncate (* l 0.05)))
+          ((> l 500) 500)
           (t (length training-frames)))))
 
-(defun default-report-frequency (iteration count elapsed-seconds since-last-report)
-  (declare (ignore iteration count elapsed-seconds))
+(defun default-report-frequency (iteration count presentation last-presentation
+                                 elapsed-seconds since-last-report)
+  (declare (ignore iteration count presentation last-presentation 
+                   elapsed-seconds))
   (>= since-last-report 10))
 
-(defun default-report-function (log-file iteration count elapsed-seconds network-error)
-  (with-open-file (log-stream log-file 
-                              :direction :output 
-                              :if-exists :append 
-                              :if-does-not-exist :create)
-    (format log-stream "t=~ds; i=~d; v=~d; e=~d~%" 
-            elapsed-seconds iteration count network-error)))
+(defun default-report-function (log-file iteration count 
+                                presentation last-presentation 
+                                elapsed-seconds since-last-report 
+                                network-error)
+  (let ((rate (if (zerop since-last-report)
+                  0
+                  (/ (- presentation last-presentation) since-last-report))))
+    (with-open-file (log-stream log-file 
+                                :direction :output 
+                                :if-exists :append 
+                                :if-does-not-exist :create)
+      (format log-stream "t=~ds; i=~d; v=~d; p=~d; l=~d; r=~fp/s; e=~d~%" 
+              elapsed-seconds iteration count 
+              presentation last-presentation rate 
+              network-error))))
 
 (defgeneric normalize-set (set)
   (:method ((set list))
@@ -757,15 +809,13 @@
                             &key 
                               (transfer-function :relu)
                               (id (bianet-id))
-                              log-file
                               (weight-reset-function 
                                (make-progressive-weight-fn :min -0.5 :max 0.5))
                               (limiter (make-limiter))
                               (momentum *default-momentum*)
                               (learning-rate *default-learning-rate*))
   (loop
-     with log = (or log-file (format nil "/tmp/~(~a~).log" id))
-     with net = (make-instance 't-net :id id :log-file log)
+     with net = (make-instance 't-net :id id)
      with last-layer = (1- (length succinct-topology))
      for neuron-count in succinct-topology
      for layer-index = 0 then (1+ layer-index)
@@ -786,6 +836,8 @@
                       :limiter limiter)
        (reset-weights net)
        (create-gates net)
+       (setf (log-file net) (default-log-file-name net))
+       (setf (weights-file net) (default-weights-file-name net))
        (return net)))
                                
 (defmethod create-gates ((net t-net))
@@ -881,22 +933,11 @@
                         for string = (map 'string 'identity chars)
                         collect (if first string (read-from-string string))))))
 
-(defun test-1-setup ()
+(defun test-1-setup (&key (topology '(784 10 2)))
   (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
          (file-train (format nil "~a/~a" folder "mnist-0-1-train.csv"))
          (file-test (format nil "~a/~a" folder "mnist-0-1-test.csv")))
     (setf *frames-train* (map 'vector 'identity 
-                              (normalize-set (type-1-file->set file-train))))
-    (setf *frames-test* (normalize-set (type-1-file->set file-test)))
-    (setf *net* (create-standard-net '(784 10 2) :id :test-1
-                                     :weight-reset-function
-                                     (make-random-weight-fn :min -0.5 :max 0.5)))))
-
-(defun test-2-setup (&optional (topology '(784 128 10)))
-  (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
-         (file-train (format nil "~a/~a" folder "mnist-train.csv"))
-         (file-test (format nil "~a/~a" folder "mnist-test.csv")))
-    (setf *frames-train* (map 'vector 'identity
                               (normalize-set (type-1-file->set file-train))))
     (setf *frames-test* (normalize-set (type-1-file->set file-test)))
     (setf *net* (create-standard-net topology 
@@ -904,8 +945,27 @@
                                      :weight-reset-function
                                      (make-random-weight-fn :min -0.5 :max 0.5)))))
 
-(defun test-train (&key (epochs 6) (thread-count 6) (reset-weights t))
+(defun test-2-setup (&key (topology '(784 128 10)) weights-file)
+  (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
+         (file-train (format nil "~a/~a" folder "mnist-train.csv"))
+         (file-test (format nil "~a/~a" folder "mnist-test.csv")))
+    (setf *frames-train* (map 'vector 'identity
+                              (normalize-set (type-1-file->set file-train))))
+    (setf *frames-test* (normalize-set (type-1-file->set file-test)))
+    (setf *net* (create-standard-net 
+                 topology 
+                 :id :test-2
+                 :weight-reset-function
+                 (make-random-weight-fn :min -0.5 :max 0.5))))
+  (when weights-file (apply-weights-from-file *net* weights-file)))
+
+(defun test-train (&key (epochs 6) 
+                     (thread-count 7) 
+                     (reset-weights t) 
+                     weights-file)
   (stop-thread-pool)
+  (when weights-file
+    (apply-weights-from-file *net* weights-file))
   (start-thread-pool thread-count)
   (train-frames *net* *frames-train* #'test-train-complete
                 :epochs epochs 
@@ -915,15 +975,21 @@
 
 (defun test-train-complete (start-time network-error)
   (stop-thread-pool)
-  (set-training-in-progress nil)
-  (with-open-file (log-stream (log-file *net*)
-                              :direction :output
-                              :if-exists :append
-                              :if-does-not-exist :create)
-    (format log-stream "Done.  t=~ds; e=~f; r=~a~%"
-            (- (get-universal-time) start-time)
-            network-error
-            (evaluate-inference-1hs *net* *frames-test*))))
+  (let ((fitness (evaluate-inference-1hs *net* *frames-test*)))
+    (with-open-file (log-stream (log-file *net*)
+                                :direction :output
+                                :if-exists :append
+                                :if-does-not-exist :create)
+      (format log-stream "Result: t=~ds; e=~f; pass=~$ (~d/~d)~%END~%"
+              (- (get-universal-time) start-time)
+              network-error
+              (getf fitness :percent)
+              (getf fitness :pass)
+              (getf fitness :total))))
+  (loop for thread in (list-all-threads)
+     when (equal (thread-name thread) "thread-work")
+     do (terminate-thread thread))
+  (set-training-in-progress nil))
   
 
 (defun test-train-clear ()
