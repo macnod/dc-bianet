@@ -739,7 +739,7 @@
 (defgeneric evaluate-inference-1hs (net training-frames)
   (:method ((net t-net) (training-frames list))
     (loop with own-threads = (not *thread-pool*)
-       initially (when own-threads (start-thread-pool 8))
+       initially (when own-threads (start-thread-pool 7))
        for (inputs expected-outputs) in training-frames
        for index = 0 then (1+ index)
        for expected-winner = (index-of-max expected-outputs)
