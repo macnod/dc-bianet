@@ -978,9 +978,6 @@
                                         :momentum momentum
                                         :weight (random 0.1 (rstate net))))))
 
-(defun get-neuron-by-name (net name)
-  (loop for 
-
 (defmethod circle-data-1hs ((net t-net) (count integer))
   (loop with true = 0.0 and false = 0.0 and state = (rstate net)
      for a from 1 to count
