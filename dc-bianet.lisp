@@ -66,38 +66,34 @@
     *job-counter*))
 
 (defun make-random-weight-fn (&key (min 0.0) (max 1.0))
+  (declare (single-float min max))
   (lambda (&key rstate
              global-fraction
              layer-fraction
              neuron-fraction)
     (declare (ignore global-fraction layer-fraction neuron-fraction))
-    (+ min (random (- max min) rstate))))
+    (+ min (the single-float (random (- max min) rstate)))))
 
 (defun make-progressive-weight-fn (&key (min 0.0) (max 1.0))
+  (declare (single-float min max))
   (lambda (&key rstate
              global-fraction
              layer-fraction
              neuron-fraction)
-    (declare (ignore rstate global-fraction neuron-fraction))
+    (declare (ignore rstate global-fraction neuron-fraction)
+             (single-float layer-fraction))
     (+ min (* layer-fraction (- max min)))))
   
 (defun make-sinusoid-weight-fn (&key (min 0.0) (max 1.0))
+  (declare (single-float min max))
   (lambda (&key rstate
              global-fraction
              layer-fraction
              neuron-fraction)
-    (declare (ignore rstate global-fraction layer-fraction))
-    (+ min (* (sin (* neuron-fraction 3.14159265)) (- max min)))))
-
-(defun make-limiter (&key (magnitude *magnitude-limit*)
-                       (precision *precision-limit*))
-  (lambda (x)
-    (let ((limited-precision (if (< (abs x) precision)
-                               (* (signum x) precision)
-                               x)))
-    (if (> (abs limited-precision) magnitude)
-        (* (signum limited-precision) magnitude)
-        limited-precision))))
+    (declare (ignore rstate global-fraction layer-fraction)
+             (single-float neuron-fraction))
+    (+ min (* (the single-float (sin (* neuron-fraction 3.14159265))) 
+              (- max min)))))
 
 (defun display-float (n)
   (read-from-string (format nil "~,4f" n)))
@@ -111,25 +107,39 @@
     (intern s :keyword)))
 
 (defun logistic (x)
-  (cond ((> x 16.64) 1.0)
-        ((< x -88.7) 0.0)
-        ((< (abs x) 1e-8) 0.5)
-        (t (/ 1.0 (1+ (exp (- x)))))))
+  (declare (single-float x)
+           (optimize (speed 3) (safety 0)))
+  (cond ((> x (the single-float 16.64)) (the single-float 1.0))
+        ((< x (the single-float -88.7)) (the single-float 0.0))
+        ((< (the single-float (abs x)) (the single-float 1e-8)) (the single-float 0.5))
+        (t (/ (the single-float 1.0) (the single-float (1+ (the single-float (exp (- x)))))))))
 
 (defun logistic-derivative (x)
-  (* x (- 1 x)))
+  (declare (single-float x)
+           (optimize (speed 3) (safety 0)))
+  (* x (- (the single-float 1.0) x)))
 
 (defun relu (x)
-  (max 0 x))
+  (declare (single-float x)
+           (optimize (speed 3) (safety 0)))
+  (the single-float (max (the single-float 0.0) x)))
 
 (defun relu-derivative (x)
-  (if (<= x 0.0) 0.0 1.0))
+  (declare (single-float x)
+           (optimize (speed 3) (safety 0)))
+  (if (<= x (the single-float 0.0)) 
+      (the single-float 0.0) 
+      (the single-float 1.0)))
 
 (defun relu-leaky (x)
-  (max 0 x))
+  (declare (single-float x)
+           (optimize (speed 3) (safety 0)))
+  (the single-float (max (the single-float 0.0) x)))
 
 (defun relu-leaky-derivative (x)
-  (if (<= x 0.0) 0.001 1.0))
+  (if (<= x (the single-float 0.0))
+      (the single-float 0.001) 
+      (the single-float 1.0)))
                               
 (defparameter *transfer-functions* 
   (list :logistic (list :function #'logistic 
@@ -147,31 +157,30 @@
            :initform (error ":source required"))
    (target :reader target :initarg :target :type t-neuron
            :initform (error ":target required"))
-   (weight :accessor weight :initarg :weight :initform 0.1 :type real)
-   (learning-rate :accessor learning-rate :initarg :learning-rate :type real
-                  :initform 0.02)
-   (momentum :accessor momentum :initarg :momentum :initform 0.1)
-   (delta :accessor delta :initarg :delta :initform 0.0)
-   (limiter :accessor limiter :initarg :limiter
-            :initform (make-limiter))
+   (weight :accessor weight :initarg :weight :initform 0.1 :type single-float)
+   (learning-rate :accessor learning-rate :initarg :learning-rate 
+                  :type single-float :initform 0.02)
+   (momentum :accessor momentum :initarg :momentum :type single-float 
+             :initform 0.1)
+   (delta :accessor delta :initarg :delta :type single-float :initform 0.0)
    (weight-mtx :reader weight-mtx :initform (make-mutex))))
 
 (defclass t-neuron ()
   ((id :accessor id :initarg :id :type keyword :initform (bianet-id))
    (name :accessor name :initarg :name :type string :initform nil)
-   (input :accessor input :type real :initform 0.0)
+   (input :accessor input :type single-float :initform 0.0)
    (biased :accessor biased :initarg :biased :type boolean :initform nil)
    (transfer-key :accessor transfer-key :initarg :transfer-key 
                  :initform :logistic)
    (transfer-function :accessor transfer-function :type function)
    (transfer-derivative :accessor transfer-derivative :type function)
-   (output :accessor output :type real :initform 0.0)
-   (expected-output :accessor expected-output :type real :initform 0.0)
-   (err :accessor err :type real :initform 0.0)
-   (err-derivative :accessor err-derivative :type real :initform 0.0)
-   (x-coor :accessor x-coor :type real :initform 0.0)
-   (y-coor :accessor y-coor :type real :initform 0.0)
-   (z-coor :accessor z-coor :type real :initform 0.0)
+   (output :accessor output :type single-float :initform 0.0)
+   (expected-output :accessor expected-output :type single-float :initform 0.0)
+   (err :accessor err :type single-float :initform 0.0)
+   (err-derivative :accessor err-derivative :type single-float :initform 0.0)
+   (x-coor :accessor x-coor :type single-float :initform 0.0)
+   (y-coor :accessor y-coor :type single-float :initform 0.0)
+   (z-coor :accessor z-coor :type single-float :initform 0.0)
    (cx-dlist :accessor cx-dlist :type dlist :initform (make-instance 'dlist))
    (input-mtx :reader input-mtx :initform (make-mutex))
    (output-mtx :reader output-mtx :initform (make-mutex))
@@ -301,12 +310,15 @@
                for cx-node = (head (cx-dlist neuron)) then (next cx-node)
                while cx-node
                for cx = (value cx-node)
-               summing (* (weight cx) (err-derivative (target cx)))))))
+               summing (the single-float 
+                            (* (the single-float (weight cx))
+                               (the single-float (err-derivative (target cx)))))))))
     (with-mutex ((err-mtx neuron)) (setf (err neuron) err))
     (with-mutex ((err-der-mtx neuron))
       (setf (err-derivative neuron)
-            (* err (funcall (transfer-derivative neuron) (output neuron)))))))
-        
+            (* (the single-float err)
+               (the single-float (funcall (transfer-derivative neuron) 
+                                          (output neuron))))))))
 
 (defmethod adjust-neuron-cx-weights ((neuron t-neuron))
     (loop
@@ -314,19 +326,13 @@
        for cx-node = (head cx-dlist) then (next cx-node)
        while cx-node do (adjust-cx-weight (value cx-node))))
 
-;; (defmethod adjust-cx-weight ((cx t-cx))
-;;   (let* ((delta (* (learning-rate cx)
-;;                    (err-derivative (target cx))
-;;                    (output (source cx))))
-;;          (new-weight (funcall (limiter cx)
-;;                               (+ (weight cx) delta (* (momentum cx) (delta cx))))))
-;;     (setf (weight cx) new-weight)))
-
 (defmethod adjust-cx-weight ((cx t-cx))
-  (let* ((delta (* (learning-rate cx)
-                   (err-derivative (target cx))
-                   (output (source cx))))
-         (new-weight (+ (weight cx) delta (* (momentum cx) (delta cx)))))
+  (let* ((delta (* (the single-float (learning-rate cx))
+                   (the single-float (err-derivative (target cx)))
+                   (the single-float (output (source cx)))))
+         (new-weight (+ (the single-float (weight cx))
+                        (the single-float delta)
+                        (the single-float (* (momentum cx) (delta cx))))))
     (with-mutex ((weight-mtx cx))
       (setf (weight cx) new-weight))))
 
@@ -338,7 +344,7 @@
      for neuron = (value neuron-node)
      for input-value in input-values
      do (with-mutex ((input-mtx neuron))
-          (setf (input neuron) input-value))))
+          (setf (input neuron) (the single-float input-value)))))
 
 (defmethod apply-outputs ((net t-net) (output-values list))
   (loop with output-layer-node = (tail (layer-dlist net))
@@ -347,7 +353,7 @@
      while neuron-node
      for neuron = (value neuron-node)
      for output-value in output-values
-     do (setf (output neuron) output-value)))
+     do (setf (output neuron) (the single-float output-value))))
 
 (defmethod apply-expected-outputs ((net t-net) (expected-output-values list))
   (loop with layer-dlist = (value (tail (layer-dlist net)))
@@ -355,7 +361,7 @@
      while neuron-node
      for neuron = (value neuron-node)
      for expected-output-value in expected-output-values
-     do (setf (expected-output neuron) expected-output-value)))
+     do (setf (expected-output neuron) (the single-float expected-output-value))))
 
 (defmethod collect-inputs ((net t-net))
   (loop with input-layer-node = (head (layer-dlist net))
@@ -638,9 +644,8 @@
                                 :direction :output 
                                 :if-exists :append 
                                 :if-does-not-exist :create)
-      (format log-stream "t=~ds; i=~d; v=~d; p=~d; l=~d; r=~fp/s; e=~d~%" 
-              elapsed-seconds iteration count 
-              presentation last-presentation rate 
+      (format log-stream "t=~ds; i=~d; v=~d; p=~d; r=~fp/s; e=~d~%" 
+              elapsed-seconds iteration count presentation rate
               network-error))))
 
 (defgeneric normalize-set (set)
@@ -810,8 +815,7 @@
                               (transfer-function :relu)
                               (id (bianet-id))
                               (weight-reset-function 
-                               (make-progressive-weight-fn :min -0.5 :max 0.5))
-                              (limiter (make-limiter))
+                               (make-random-weight-fn :min -0.5 :max 0.5))
                               (momentum *default-momentum*)
                               (learning-rate *default-learning-rate*))
   (loop
@@ -830,10 +834,7 @@
      finally
        (setf (initial-weight-function net) weight-reset-function)
        (name-neurons net)
-       (connect-fully net
-                      :learning-rate learning-rate
-                      :momentum momentum
-                      :limiter limiter)
+       (connect-fully net :learning-rate learning-rate :momentum momentum)
        (reset-weights net)
        (create-gates net)
        (setf (log-file net) (default-log-file-name net))
@@ -869,8 +870,7 @@
 
 (defun connect-fully (net &key 
                             (learning-rate *default-learning-rate*)
-                            (momentum *default-momentum*)
-                            (limiter (make-limiter)))
+                            (momentum *default-momentum*))
   (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
      while (next layer-node)
      for layer = (value layer-node)
@@ -890,8 +890,7 @@
                     :source source 
                     :target target
                     :learning-rate learning-rate
-                    :momentum momentum
-                    :limiter limiter))))))
+                    :momentum momentum))))))
 
 (defmethod circle-data-1hs ((net t-net) (count integer))
   (loop with true = 0.0 and false = 0.0 and state = (rstate net)
