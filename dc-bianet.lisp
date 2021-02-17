@@ -363,6 +363,21 @@
      for expected-output-value in expected-output-values
      do (setf (expected-output neuron) (the single-float expected-output-value))))
 
+(defgeneric collect-neurons (thing)
+  (:method ((net t-net))
+    (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
+       while layer-node
+       for layer = (value layer-node)
+       append (collect-neurons layer)))
+  (:method ((layer dlist))
+    (loop for neuron-node = (head layer) then (next neuron-node)
+       while neuron-node
+       collect (value neuron-node))))
+
+(defun neuron-by-name (structure name)
+  (car (remove-if-not (lambda (n) (equal name (name n)))
+                      (collect-neurons structure))))
+
 (defmethod collect-inputs ((net t-net))
   (loop with input-layer-node = (head (layer-dlist net))
      for input-layer = (value input-layer-node)
@@ -467,6 +482,23 @@
                       (setf (delta cx) 0.0))
                    (incf global-index)
                    (incf layer-index)))))
+
+(defun reset-neuron-weights (net neuron)
+  (loop with neuron-count = (length (collect-weights neuron))
+     for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+     while cx-node
+     for cx = (value cx-node)
+     for neuron-index = 0 then (1+ neuron-index)
+     for weight = (the single-float 
+                       (funcall (initial-weight-function net)
+                                :rstate (rstate net)
+                                :global-fraction 0.0
+                                :layer-fraction 0.0
+                                :neuron-fraction (/ (float neuron-index)
+                                                    (float neuron-count))))
+     do (with-mutex ((weight-mtx cx))
+          (setf (weight cx) weight)
+          (setf (delta cx) (the single-float 0.0)))))
 
 (defgeneric collect-cxs (thing)
   (:method ((net t-net))
@@ -892,6 +924,63 @@
                     :learning-rate learning-rate
                     :momentum momentum))))))
 
+(defun add-connected-neuron (net hidden-layer-node
+                             &key
+                               (learning-rate *default-learning-rate*)
+                               (momentum *default-momentum*))
+  (let ((neuron (make-instance 't-neuron 
+                               :id (bianet-id)
+                               :biased nil
+                               :transfer-key :relu))
+        (hidden-layer (value hidden-layer-node))
+        (prev-layer (value (prev hidden-layer-node)))
+        (next-layer (value (next hidden-layer-node))))
+    ;; Add neuron to hidden layer
+    (push-tail hidden-layer neuron) 
+    ;; Add incoming connections from previous layer
+    (add-incoming-cxs net neuron prev-layer
+                      :learning-rate learning-rate
+                      :momentum momentum)
+    ;; Add outgoing connections to next layer
+    (add-outgoing-cxs net neuron next-layer
+                      :learning-rate learning-rate
+                      :momentum momentum))
+  (name-neurons net))
+
+(defun add-incoming-cxs (net neuron source-layer
+                         &key
+                           (learning-rate *default-learning-rate*)
+                           (momentum *default-momentum*))
+  (loop for source-node = (head source-layer) then (next source-node)
+     while source-node
+     for source = (value source-node)
+     for cx = (make-instance 't-cx
+                             :source source
+                             :target neuron
+                             :learning-rate learning-rate
+                             :momentum momentum
+                             :weight (random 0.1 (rstate net)))
+     do (push-tail (cx-dlist source) cx)))
+
+(defun add-outgoing-cxs (net neuron target-layer
+                         &key
+                           (learning-rate *default-learning-rate*)
+                           (momentum *default-momentum*))
+    (loop with cxs = (cx-dlist neuron)
+       for target-node = (head target-layer) then (next target-node)
+       while target-node
+       for target = (value target-node)
+       when (not (biased target))
+       do (push-tail cxs (make-instance 't-cx
+                                        :source neuron
+                                        :target target
+                                        :learning-rate learning-rate
+                                        :momentum momentum
+                                        :weight (random 0.1 (rstate net))))))
+
+(defun get-neuron-by-name (net name)
+  (loop for 
+
 (defmethod circle-data-1hs ((net t-net) (count integer))
   (loop with true = 0.0 and false = 0.0 and state = (rstate net)
      for a from 1 to count
@@ -960,7 +1049,8 @@
 
 (defun test-train (&key (epochs 6) 
                      (thread-count 7) 
-                     (reset-weights t) 
+                     (reset-weights t)
+                     (target-error 0.05)
                      weights-file)
   (stop-thread-pool)
   (when weights-file
@@ -968,8 +1058,8 @@
   (start-thread-pool thread-count)
   (train-frames *net* *frames-train* #'test-train-complete
                 :epochs epochs 
-                :target-error 0.05 
-                :reset-weights reset-weights)
+                :target-error target-error
+                :reset-weights (and reset-weights (not weights-file)))
   :training)
 
 (defun test-train-complete (start-time network-error)
