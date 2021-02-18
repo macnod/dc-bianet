@@ -1075,7 +1075,8 @@
   (loop for thread in (list-all-threads)
      when (equal (thread-name thread) "thread-work")
      do (terminate-thread thread))
-  (set-training-in-progress nil))
+  (set-training-in-progress nil)
+  (collect-weights-into-file *net*))
   
 
 (defun test-train-clear ()
