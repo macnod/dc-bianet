@@ -16,9 +16,9 @@
 (defparameter *training-in-progress-mutex* (make-mutex :name "training-in-progress"))
 (defparameter *continue-training* nil)
 
-(defparameter *frames-train* nil)
-(defparameter *frames-test* nil)
-(defparameter *net* nil)
+(defparameter *training* nil)
+(defparameter *testing* nil)
+(defparameter *nets* nil)
 
 (defun thread-work ()
   (loop for (k v) = (receive-message *job-queue*)
@@ -594,6 +594,7 @@
                                        report-function 
                                        report-frequency)))
         (funcall when-complete
+                 (id net)
                  (getf result :start-time) 
                  (getf result :network-error))))
     :name "main-training-thread")))
@@ -639,19 +640,19 @@
      finally (return (list :start-time start-time 
                            :network-error network-error))))
 
-(defun stop-training-frames (net)
-  (when (get-training-in-progress)
-    (stop-thread-pool)
-    (let ((message (format nil "END")))
-      (with-open-file (stream (log-file net)
-                              :direction :output
-                              :if-exists :append
-                              :if-does-not-exist :create)
-        (write-line message stream))
-      (format t message))
-    (sleep 1)
-    (set-training-in-progress nil)))
-
+(defun stop-training (id)
+  (let ((net (getf *nets* id)))
+    (when (get-training-in-progress)
+      (stop-thread-pool)
+      (let ((message (format nil "END")))
+        (with-open-file (stream (log-file net)
+                                :direction :output
+                                :if-exists :append
+                                :if-does-not-exist :create)
+          (write-line message stream))
+        (format t message))
+      (sleep 1)
+      (set-training-in-progress nil))))
 
 (defun error-subset-count (training-frames)
   (let ((l (length training-frames)))
@@ -1018,51 +1019,100 @@
                         for string = (map 'string 'identity chars)
                         collect (if first string (read-from-string string))))))
 
-(defun test-1-setup (&key (topology '(784 10 2)))
-  (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
-         (file-train (format nil "~a/~a" folder "mnist-0-1-train.csv"))
-         (file-test (format nil "~a/~a" folder "mnist-0-1-test.csv")))
-    (setf *frames-train* (map 'vector 'identity 
-                              (normalize-set (type-1-file->set file-train))))
-    (setf *frames-test* (normalize-set (type-1-file->set file-test)))
-    (setf *net* (create-standard-net topology 
-                                     :id :test-1
-                                     :weight-reset-function
-                                     (make-random-weight-fn :min -0.5 :max 0.5)))))
+(defun join-paths (&rest path-parts)
+  (loop while (and (not (zerop (length path-parts)))
+                   (or (null (car path-parts))
+                       (zerop (length (car path-parts)))))
+       do (pop path-parts))
+  (loop for path in path-parts
+     for l = (length path)
+     for first-char = (when (> l 0) (subseq path 0 1))
+     for last-index = (when (> l 0) (1- (length path)))
+     for last-char = (when (> l 0) (subseq path last-index))
+     for path1 = (when (and first-char (> l 1))
+                   (if (equal first-char "/") (subseq path 1) path))
+     for l1 = (length path1)
+     for last-index1 = (when (> l1 0) (1- (length path1)))
+     for path2 = (when (> l1 0)
+                   (if (equal last-char "/") (subseq path1 0 last-index1) path1))
+     for l2 = (length path2)
+     when (> l2 0)
+     collecting path2 into parts
+     finally 
+       (return (format nil "~a~{~a~^/~}"
+                       (if (and (not (zerop (length (car path-parts))))
+                                (equal (subseq (car path-parts) 0 1) "/"))
+                           "/" "")
+                       parts))))
 
-(defun test-2-setup (&key (topology '(784 128 10)) weights-file)
-  (let* ((folder "/home/macnod/google-drive/dc/cloud-local/Projects/Mindrigger/data/mnist")
-         (file-train (format nil "~a/~a" folder "mnist-train.csv"))
-         (file-test (format nil "~a/~a" folder "mnist-test.csv")))
-    (setf *frames-train* (map 'vector 'identity
-                              (normalize-set (type-1-file->set file-train))))
-    (setf *frames-test* (normalize-set (type-1-file->set file-test)))
-    (setf *net* (create-standard-net 
-                 topology 
-                 :id :test-2
-                 :weight-reset-function
-                 (make-random-weight-fn :min -0.5 :max 0.5))))
-  (when weights-file (apply-weights-from-file *net* weights-file)))
+(defun create-environment 
+    (&key 
+       (id :zero-or-one) 
+       (topology '(784 16 2))
+       (home-folder (join-paths (namestring (user-homedir-pathname))
+                                "common-lisp" "dc-bianet"))
+       (testing-file "mnist-0-1-test.csv")
+       (training-file "mnist-0-1-train.csv")
+       (weight-reset-function ;; Function to compute initial weight values
+        (make-random-weight-fn :min -0.5 :max 0.5)))
+  (setf (getf *training* id) 
+        (map 'vector 'identity 
+             (normalize-set 
+              (type-1-file->set (join-paths home-folder training-file)))))
+  (setf (getf *testing* id)
+        (normalize-set 
+         (type-1-file->set (join-paths home-folder testing-file))))
+  (setf (getf *nets* id)
+        (create-standard-net 
+         topology
+         :id id
+         :weight-reset-function weight-reset-function)))
 
-(defun test-train (&key (epochs 6) 
-                     (thread-count 7) 
-                     (reset-weights t)
-                     (target-error 0.05)
-                     weights-file)
+(defun remove-environment (id)
+  (remf *nets* id)
+  (remf *training* id)
+  (remf *testing* id))
+
+(defun list-environments ()
+  (loop for id in *nets* by #'cddr
+     for net = (getf *nets* id)
+     for topology = (simple-topology net)
+     for training-set = (getf *training* id)
+     for test-set = (getf *testing* id)
+     collect (list :id id :topology topology 
+                   :training-set (length training-set) 
+                   :test-set (length test-set))))
+
+(defun train (id &key (epochs 100)
+                   (target-error 0.05)
+                   (reset-weights t)
+                   weights-file
+                   (thread-count (- (cl-cpus:get-number-of-processors) 2)))
+  (let ((net (getf *nets* id))
+        (training-set (getf *training* id))
+        (test-set (getf *testing* id)))
+    (cond ((and (not net) (not training-set) (not test-set)) :no-such-environment)
+          ((not net) :no-net)
+          ((not training-set) :no-training-set)
+          ((not test-set) :no-test-set)
+          (t (when weights-file
+               (if (stringp weights-file)
+                   (apply-weights-from-file net weights-file)
+                   (apply-weights-from-file net (weights-file net)))
+               (setf reset-weights nil))
+             (start-thread-pool thread-count)
+             (train-frames net training-set #'training-complete
+                           :epochs epochs
+                           :target-error target-error
+                           :reset-weights reset-weights)
+             :training))))
+
+(defun training-complete (id start-time network-error)
   (stop-thread-pool)
-  (when weights-file
-    (apply-weights-from-file *net* weights-file))
-  (start-thread-pool thread-count)
-  (train-frames *net* *frames-train* #'test-train-complete
-                :epochs epochs 
-                :target-error target-error
-                :reset-weights (and reset-weights (not weights-file)))
-  :training)
-
-(defun test-train-complete (start-time network-error)
-  (stop-thread-pool)
-  (let ((fitness (evaluate-inference-1hs *net* *frames-test*)))
-    (with-open-file (log-stream (log-file *net*)
+  (let* ((net (getf *nets* id))
+         (test-set (getf *testing* id))
+         (fitness (evaluate-inference-1hs net test-set)))
+    (with-open-file (log-stream (log-file net)
                                 :direction :output
                                 :if-exists :append
                                 :if-does-not-exist :create)
@@ -1071,18 +1121,13 @@
               network-error
               (getf fitness :percent)
               (getf fitness :pass)
-              (getf fitness :total))))
-  (loop for thread in (list-all-threads)
-     when (equal (thread-name thread) "thread-work")
-     do (terminate-thread thread))
-  (set-training-in-progress nil)
-  (collect-weights-into-file *net*))
+              (getf fitness :total)))
+    (loop for thread in (list-all-threads)
+       when (equal (thread-name thread) "thread-work")
+       do (terminate-thread thread))
+    (set-training-in-progress nil)
+    (collect-weights-into-file net)))
   
-
-(defun test-train-clear ()
-  (stop-thread-pool)
-  (set-training-in-progress nil))
-
 (defun shuffle (seq)
   "Return a sequence with the same elements as the given sequence S, but in random order (shuffled)."
   (loop
@@ -1105,3 +1150,6 @@
                 finally (setf (gethash c h) t)
                   (return c))
      collect (elt vector b)))
+
+(defun net-by-id (id)
+  (getf *nets* id))
