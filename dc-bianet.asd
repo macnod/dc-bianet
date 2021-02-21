@@ -4,7 +4,7 @@
   :description "Flexible multilayer backprop neural network simulation."
   :author "Donnie Cameron <macnod@gmail.com>"
   :license "MIT License"
-  :depends-on (#:sb-concurrency #:dc-dlist #:cl-cpus)
+  :depends-on (#:sb-concurrency #:dc-dlist #:cl-cpus #:clog)
   :serial t
   :components ((:file "dc-bianet-package")
                (:file "dc-bianet")))

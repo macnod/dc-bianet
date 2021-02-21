@@ -20,6 +20,8 @@
 (defparameter *testing* nil)
 (defparameter *nets* nil)
 
+(defparameter *canvas* nil)
+
 (defun thread-work ()
   (loop for (k v) = (receive-message *job-queue*)
      do (case k
@@ -235,7 +237,7 @@
 (defmethod simple-topology ((net t-net))
   (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
      while layer-node
-     collect (len (value layer-node))))
+     collect (len (payload layer-node))))
 
 (defgeneric feedforward (thing)
 
@@ -247,7 +249,7 @@
        for layer-gate = (elt *gates* layer-gate-index)
        do 
          (close-gate layer-gate)
-         (feedforward (value layer-node))
+         (feedforward (payload layer-node))
          (send-message *job-queue* (list :open-gate layer-gate-index))
          (wait-on-gate layer-gate)))
 
@@ -257,14 +259,14 @@
        while neuron-node
        do (send-message *job-queue* 
                         (list :fire
-                              (let ((neuron (value neuron-node)))
+                              (let ((neuron (payload neuron-node)))
                                 (lambda () (feedforward neuron)))))))
   
   (:method ((neuron t-neuron))
     (loop initially (transfer neuron)
        for cx-node = (head (cx-dlist neuron)) then (next cx-node)
        while cx-node
-       do (feedforward (value cx-node))))
+       do (feedforward (payload cx-node))))
 
   (:method ((cx t-cx))
     (let ((target-input-impact (* (weight cx) (output (source cx))))
@@ -282,7 +284,7 @@
        for layer-gate = (elt *gates* layer-gate-index)
        do
          (close-gate layer-gate)
-         (backpropagate (value layer-node))
+         (backpropagate (payload layer-node))
          (send-message *job-queue* (list :open-gate layer-gate-index))
          (wait-on-gate layer-gate)))
 
@@ -292,7 +294,7 @@
        while neuron-node 
        do (send-message *job-queue* 
                         (list :backprop
-                              (let ((neuron (value neuron-node)))
+                              (let ((neuron (payload neuron-node)))
                                 (lambda () (backpropagate neuron)))))))
   
   (:method ((neuron t-neuron))
@@ -309,7 +311,7 @@
             (loop
                for cx-node = (head (cx-dlist neuron)) then (next cx-node)
                while cx-node
-               for cx = (value cx-node)
+               for cx = (payload cx-node)
                summing (the single-float 
                             (* (the single-float (weight cx))
                                (the single-float (err-derivative (target cx)))))))))
@@ -324,7 +326,7 @@
     (loop
        with cx-dlist = (cx-dlist neuron)
        for cx-node = (head cx-dlist) then (next cx-node)
-       while cx-node do (adjust-cx-weight (value cx-node))))
+       while cx-node do (adjust-cx-weight (payload cx-node))))
 
 (defmethod adjust-cx-weight ((cx t-cx))
   (let* ((delta (* (the single-float (learning-rate cx))
@@ -338,28 +340,28 @@
 
 (defmethod apply-inputs ((net t-net) (input-values list))
   (loop with input-layer-node = (head (layer-dlist net))
-     with input-layer = (value input-layer-node)
+     with input-layer = (payload input-layer-node)
      for neuron-node = (head input-layer) then (next neuron-node)
      while neuron-node
-     for neuron = (value neuron-node)
+     for neuron = (payload neuron-node)
      for input-value in input-values
      do (with-mutex ((input-mtx neuron))
           (setf (input neuron) (the single-float input-value)))))
 
 (defmethod apply-outputs ((net t-net) (output-values list))
   (loop with output-layer-node = (tail (layer-dlist net))
-     with output-layer = (value output-layer-node)
+     with output-layer = (payload output-layer-node)
      for neuron-node = (head output-layer) then (next neuron-node)
      while neuron-node
-     for neuron = (value neuron-node)
+     for neuron = (payload neuron-node)
      for output-value in output-values
      do (setf (output neuron) (the single-float output-value))))
 
 (defmethod apply-expected-outputs ((net t-net) (expected-output-values list))
-  (loop with layer-dlist = (value (tail (layer-dlist net)))
+  (loop with layer-dlist = (payload (tail (layer-dlist net)))
      for neuron-node = (head layer-dlist) then (next neuron-node)
      while neuron-node
-     for neuron = (value neuron-node)
+     for neuron = (payload neuron-node)
      for expected-output-value in expected-output-values
      do (setf (expected-output neuron) (the single-float expected-output-value))))
 
@@ -367,12 +369,12 @@
   (:method ((net t-net))
     (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
        while layer-node
-       for layer = (value layer-node)
+       for layer = (payload layer-node)
        append (collect-neurons layer)))
   (:method ((layer dlist))
     (loop for neuron-node = (head layer) then (next neuron-node)
        while neuron-node
-       collect (value neuron-node))))
+       collect (payload neuron-node))))
 
 (defun neuron-by-name (structure name)
   (car (remove-if-not (lambda (n) (equal name (name n)))
@@ -380,55 +382,55 @@
 
 (defmethod collect-inputs ((net t-net))
   (loop with input-layer-node = (head (layer-dlist net))
-     for input-layer = (value input-layer-node)
+     for input-layer = (payload input-layer-node)
      for neuron-node = (head input-layer) then (next neuron-node)
      while neuron-node
-     for neuron = (value neuron-node)
+     for neuron = (payload neuron-node)
      collect (input neuron)))
 
 (defmethod collect-all-inputs ((net t-net))
   (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
      while layer-node append
-       (loop for neuron-node = (head (value layer-node)) then (next neuron-node)
+       (loop for neuron-node = (head (payload layer-node)) then (next neuron-node)
           while neuron-node
-          collect (input (value neuron-node)))))
+          collect (input (payload neuron-node)))))
 
 (defmethod collect-outputs ((net t-net))
   (loop with output-layer-node = (tail (layer-dlist net))
-     for output-layer = (value output-layer-node)
+     for output-layer = (payload output-layer-node)
      for neuron-node = (head output-layer) then (next neuron-node)
-     while neuron-node collect (output (value neuron-node))))
+     while neuron-node collect (output (payload neuron-node))))
 
 (defmethod collect-output-errors ((net t-net))
   (loop with output-layer-node = (tail (layer-dlist net))
-     with output-layer = (value output-layer-node)
+     with output-layer = (payload output-layer-node)
      for neuron-node = (head output-layer) then (next neuron-node)
-     while neuron-node collect (err (value neuron-node))))
+     while neuron-node collect (err (payload neuron-node))))
 
 (defmethod collect-expected-outputs ((net t-net))
   (loop with output-layer-node = (tail (layer-dlist net))
-     for output-layer = (value output-layer-node)
+     for output-layer = (payload output-layer-node)
      for neuron-node = (head output-layer) then (next neuron-node)
-     while neuron-node collect (expected-output (value neuron-node))))
+     while neuron-node collect (expected-output (payload neuron-node))))
 
 (defgeneric collect-weights (thing)
   (:method ((net t-net))
     (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
        for layer-index = 1 then (1+ layer-index)
        while layer-node
-       for layer = (value layer-node) 
+       for layer = (payload layer-node) 
        append (collect-weights layer)))
   (:method ((layer dlist))
     (loop for neuron-node = (head layer) then (next neuron-node)
        for neuron-index = 1 then (1+ neuron-index)
        while neuron-node
-       for neuron = (value neuron-node) 
+       for neuron = (payload neuron-node) 
        append (collect-weights neuron)))
   (:method ((neuron t-neuron))
     (loop for cx-node = (head (cx-dlist neuron)) then (next cx-node)
        for cx-index = 1 then (1+ cx-index)
        while cx-node
-       for cx = (value cx-node)
+       for cx = (payload cx-node)
        collect (weight cx))))
 
 (defun collect-weights-into-file (thing &optional filename)
@@ -458,16 +460,16 @@
      and global-count = (length (collect-weights net))
      for layer-node = (head (layer-dlist net)) then (next layer-node)
      while layer-node
-     for layer = (value layer-node)
+     for layer = (payload layer-node)
      do (loop with layer-index = 0 
            and layer-count = (length (collect-weights layer))
            for neuron-node = (head layer) then (next neuron-node)
            while neuron-node
-           for neuron = (value neuron-node)
+           for neuron = (payload neuron-node)
            do (loop with neuron-count = (length (collect-weights neuron))
                  for cx-node = (head (cx-dlist neuron)) then (next cx-node)
                  while cx-node
-                 for cx = (value cx-node)
+                 for cx = (payload cx-node)
                  for neuron-index = 0 then (1+ neuron-index)
                  for weight = (funcall (initial-weight-function net)
                                        :rstate (rstate net)
@@ -487,7 +489,7 @@
   (loop with neuron-count = (length (collect-weights neuron))
      for cx-node = (head (cx-dlist neuron)) then (next cx-node)
      while cx-node
-     for cx = (value cx-node)
+     for cx = (payload cx-node)
      for neuron-index = 0 then (1+ neuron-index)
      for weight = (the single-float 
                        (funcall (initial-weight-function net)
@@ -504,29 +506,29 @@
   (:method ((net t-net))
     (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
        while layer-node
-       append (collect-cxs (value layer-node))))
+       append (collect-cxs (payload layer-node))))
   (:method ((layer dlist))
     (loop for neuron-node = (head layer) then (next neuron-node)
        while neuron-node
-       append (collect-cxs (value neuron-node))))
+       append (collect-cxs (payload neuron-node))))
   (:method ((neuron t-neuron))
     (loop for cx-node = (head (cx-dlist neuron)) then (next cx-node)
        while cx-node
-       collect (value cx-node))))
+       collect (payload cx-node))))
 
 (defgeneric render-as-text (thing)
   (:method ((net t-net))
     (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
        for layer-index = 1 then (1+ layer-index)
        while layer-node
-       for layer = (value layer-node)
+       for layer = (payload layer-node)
        do 
          (format t "Layer ~d~%" layer-index)
          (render-as-text layer)))
   (:method ((layer dlist))
     (loop for neuron-node = (head layer) then (next neuron-node)
        while neuron-node
-       for neuron = (value neuron-node)
+       for neuron = (payload neuron-node)
        do
          (format t "  Neuron ~a ~(~a~) i=~,4f; o=~,4f; eo=~,4f; e=~,4f; ed=~,4f~%" 
                  (name neuron) 
@@ -540,7 +542,7 @@
   (:method ((neuron t-neuron))
     (loop for cx-node = (head (cx-dlist neuron)) then (next cx-node)
        while cx-node
-       for cx = (value cx-node)
+       for cx = (payload cx-node)
        do (format t "    ~,4f -> ~a~%" (weight cx) (name (target cx))))))
 
 (defmethod infer-frame ((net t-net) (inputs list))
@@ -889,11 +891,11 @@
      for layer-node = (head (layer-dlist net)) then (next layer-node)
      for layer-index = 1 then (1+ layer-index)
      while layer-node
-     for layer = (value layer-node)
+     for layer = (payload layer-node)
      do (loop for neuron-node = (head layer) then (next neuron-node)
            for neuron-index = 1 then (1+ neuron-index)
            while neuron-node
-           for neuron = (value neuron-node)
+           for neuron = (payload neuron-node)
            do (incf global-index)
              (setf (name neuron) 
                    (format nil "~a-~a~a" 
@@ -906,14 +908,14 @@
                             (momentum *default-momentum*))
   (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
      while (next layer-node)
-     for layer = (value layer-node)
-     for next-layer = (value (next layer-node))
+     for layer = (payload layer-node)
+     for next-layer = (payload (next layer-node))
      do (loop for source-node = (head layer) then (next source-node)
            while source-node do 
              (loop for target-node = (head next-layer) then (next target-node)
                 while target-node
-                for source = (value source-node)
-                for target = (value target-node)
+                for source = (payload source-node)
+                for target = (payload target-node)
                 when (not (biased target))
                 do
                   (push-tail 
@@ -933,9 +935,9 @@
                                :id (bianet-id)
                                :biased nil
                                :transfer-key :relu))
-        (hidden-layer (value hidden-layer-node))
-        (prev-layer (value (prev hidden-layer-node)))
-        (next-layer (value (next hidden-layer-node))))
+        (hidden-layer (payload hidden-layer-node))
+        (prev-layer (payload (prev hidden-layer-node)))
+        (next-layer (payload (next hidden-layer-node))))
     ;; Add neuron to hidden layer
     (push-tail hidden-layer neuron) 
     ;; Add incoming connections from previous layer
@@ -954,7 +956,7 @@
                            (momentum *default-momentum*))
   (loop for source-node = (head source-layer) then (next source-node)
      while source-node
-     for source = (value source-node)
+     for source = (payload source-node)
      for cx = (make-instance 't-cx
                              :source source
                              :target neuron
@@ -970,7 +972,7 @@
     (loop with cxs = (cx-dlist neuron)
        for target-node = (head target-layer) then (next target-node)
        while target-node
-       for target = (value target-node)
+       for target = (payload target-node)
        when (not (biased target))
        do (push-tail cxs (make-instance 't-cx
                                         :source neuron
@@ -1153,3 +1155,4 @@
 
 (defun net-by-id (id)
   (getf *nets* id))
+
