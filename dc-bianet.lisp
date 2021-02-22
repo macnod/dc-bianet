@@ -6,6 +6,11 @@
 (defparameter *default-momentum* 0.1)
 (defparameter *default-min-weight* -0.9)
 (defparameter *default-max-weight* 0.9)
+(defparameter *default-thread-count*
+  (let ((count (cl-cpus:get-number-of-processors)))
+    (cond ((< count 2) 1)
+          ((< count 4) (1- count))
+          (t (- count 2)))))
 
 (defparameter *job-queue* nil) ;; mailbox
 (defparameter *job-counter* 0)
@@ -16,9 +21,8 @@
 (defparameter *training-in-progress-mutex* (make-mutex :name "training-in-progress"))
 (defparameter *continue-training* nil)
 
-(defparameter *training* nil)
-(defparameter *testing* nil)
-(defparameter *nets* nil)
+(defparameter *environments* nil) ;; p-list of id -> environment
+(defparameter *pngs* nil)
 
 (defun thread-work ()
   (loop for (k v) = (receive-message *job-queue*)
@@ -219,6 +223,33 @@
    (initial-weight-function 
     :accessor initial-weight-function
     :initform (make-progressive-weight-fn :min -0.9 :max 0.9))))
+
+(defclass t-environment ()
+  ((id :accessor id :initarg :id :type keyword)
+   (net :accessor net :initarg :net :type t-net)
+   (training-filename :accessor training-filename
+                      :initarg :training-filename
+                      :type string)
+   (test-filename :accessor test-filename
+                  :initarg :test-filename
+                  :type string)
+   (training-set :accessor training-set
+                 :initarg :training-set
+                 :initform (vector)
+                 :type vector)
+   (test-set :accessor test-set
+             :initarg :test-set
+             :initform nil
+             :type list)
+   (label->index :accessor label->index
+                 :initarg :label->index
+                 :type hashtable)
+   (label->expected-outputs :accessor label->expected-outputs
+                            :initarg :label->expected-outputs
+                            :type hashtable)
+   (index->label :accessor index->label
+                 :initarg :index->label
+                 :type vector)))
 
 (defmethod default-log-file-name ((net t-net))
   (format nil "~atmp/~(~a~)-~{~a~^-~}.log"
@@ -544,9 +575,12 @@
        do (format t "    ~,4f -> ~a~%" (weight cx) (name (target cx))))))
 
 (defmethod infer-frame ((net t-net) (inputs list))
-  (apply-inputs net inputs)
-  (feedforward net)
-  (collect-outputs net))
+  (let ((own-threads (not *thread-pool*)))
+    (when own-threads (start-thread-pool *default-thread-count*))
+    (apply-inputs net inputs)
+    (feedforward net)
+    (when own-threads (stop-thread-pool))
+    (collect-outputs net)))
 
 (defmethod train-frame ((net t-net) (inputs list) (expected-outputs list))
   (infer-frame net inputs)
@@ -641,11 +675,11 @@
                            :network-error network-error))))
 
 (defun stop-training (id)
-  (let ((net (getf *nets* id)))
+  (let ((log-file (log-file (net (getf *environments* id)))))
     (when (get-training-in-progress)
       (stop-thread-pool)
       (let ((message (format nil "END")))
-        (with-open-file (stream (log-file net)
+        (with-open-file (stream log-file
                                 :direction :output
                                 :if-exists :append
                                 :if-does-not-exist :create)
@@ -709,11 +743,8 @@
   (loop for k being the hash-keys in hash-table using (hash-value v)
        collect (list k v)))
 
-(defun type-1-file->set (filename)
-  (let* ((label-counts (type-1-file->label-counts filename))
-         (label-outputs (label-outputs-hash 
-                        (label-counts->label-indexes label-counts)))
-         (line-count (file-line-count filename))
+(defun type-1-file->set (filename label->expected-outputs)
+  (let* ((line-count (file-line-count filename))
          (set (make-array line-count :element-type 'list :initial-element nil)))
     (with-open-file (file filename)
       (loop for line = (read-line file nil)
@@ -722,7 +753,7 @@
          for values = (type-1-csv-line->label-and-inputs line)
          for label = (car values)
          for inputs = (cdr values)
-         for expected-outputs = (gethash label label-outputs)
+         for expected-outputs = (gethash label label->expected-outputs)
          do (setf (aref set index) (list inputs expected-outputs))))
     set))
          
@@ -738,8 +769,8 @@
      for a from 0 below (hash-table-count label-indexes)
      collect (if (= a index) 1.0 0.0)))
 
-(defun outputs->label (outputs index-labels)
-  (gethash (index-of-max outputs) index-labels))
+(defun outputs->label (environment outputs)
+  (elt (index->label environment) (index-of-max outputs)))
          
 (defun label-counts->label-indexes (label-counts)
   (loop with label-indexes = (make-hash-table :test 'equal)
@@ -1051,68 +1082,80 @@
        (topology '(784 16 2))
        (home-folder (join-paths (namestring (user-homedir-pathname))
                                 "common-lisp" "dc-bianet"))
-       (testing-file "mnist-0-1-test.csv")
+       (test-file "mnist-0-1-test.csv")
        (training-file "mnist-0-1-train.csv")
-       (weight-reset-function ;; Function to compute initial weight values
-        (make-random-weight-fn :min -0.5 :max 0.5)))
-  (setf (getf *training* id) 
-        (map 'vector 'identity 
-             (normalize-set 
-              (type-1-file->set (join-paths home-folder training-file)))))
-  (setf (getf *testing* id)
-        (normalize-set 
-         (type-1-file->set (join-paths home-folder testing-file))))
-  (setf (getf *nets* id)
-        (create-standard-net 
-         topology
-         :id id
-         :weight-reset-function weight-reset-function)))
+       (weight-reset-function (make-random-weight-fn :min -0.5 :max 0.5)))
+  (let* ((training-file-name (join-paths home-folder training-file))
+         (test-file-name (join-paths home-folder test-file))
+         (label-counts (type-1-file->label-counts training-file-name))
+         (label->index (label-counts->label-indexes label-counts))
+         (label->expected-outputs (label-outputs-hash label->index))
+         (index->label (loop for label being the hash-keys in label->index
+                          collect label into list
+                          finally
+                            (return
+                              (map 'vector 'identity
+                                   (sort list
+                                         (lambda (a b)
+                                           (< (gethash a label->index)
+                                              (gethash b label->index))))))))
+         (training-set (map 'vector 'identity
+                            (normalize-set
+                             (type-1-file->set training-file-name
+                                               label->expected-outputs))))
+         (test-set (normalize-set (type-1-file->set test-file-name
+                                                   label->expected-outputs)))
+         (net (create-standard-net
+               topology
+               :id id
+               :weight-reset-function weight-reset-function)))
+    (setf (getf *environments* id)
+          (make-instance 't-environment
+                         :id id
+                         :net net
+                         :training-filename training-file-name
+                         :test-filename test-file-name
+                         :training-set training-set
+                         :test-set test-set
+                         :label->index label->index
+                         :label->expected-outputs label->expected-outputs
+                         :index->label index->label))))
 
 (defun remove-environment (id)
-  (remf *nets* id)
-  (remf *training* id)
-  (remf *testing* id))
+  (remf *environments* id))
 
 (defun list-environments ()
-  (loop for id in *nets* by #'cddr
-     for net = (getf *nets* id)
-     for topology = (simple-topology net)
-     for training-set = (getf *training* id)
-     for test-set = (getf *testing* id)
-     collect (list :id id :topology topology 
-                   :training-set (length training-set) 
-                   :test-set (length test-set))))
+  (loop for environment in *environments*
+     collect (list :id (id environment)
+                   :topology (simple-topology (net environment))
+                   :training-set (length (training-set environment))
+                   :test-set (length (test-set environment)))))
 
 (defun train (id &key (epochs 100)
                    (target-error 0.05)
                    (reset-weights t)
                    weights-file
-                   (thread-count (- (cl-cpus:get-number-of-processors) 2)))
-  (let ((net (getf *nets* id))
-        (training-set (getf *training* id))
-        (test-set (getf *testing* id)))
-    (cond ((and (not net) (not training-set) (not test-set)) :no-such-environment)
-          ((not net) :no-net)
-          ((not training-set) :no-training-set)
-          ((not test-set) :no-test-set)
-          (t (when weights-file
-               (if (stringp weights-file)
-                   (apply-weights-from-file net weights-file)
-                   (apply-weights-from-file net (weights-file net)))
-               (setf reset-weights nil))
-             (start-thread-pool thread-count)
-             (train-frames net training-set #'training-complete
-                           :epochs epochs
-                           :target-error target-error
-                           :reset-weights reset-weights)
-             :training))))
+                   (thread-count *default-thread-count*))
+  (let ((environment (getf *environments* id)))
+    (when (not environment) (error "No such environment ~(~a~)" id))
+    (when weights-file
+      (apply-weights-from-file (net environment) weights-file)
+      (setf reset-weights nil))
+    (start-thread-pool thread-count)
+    (train-frames (net environment)
+                  (training-set environment)
+                  #'training-complete
+                  :epochs epochs
+                  :target-error target-error
+                  :reset-weights reset-weights))
+  :training)
 
 (defun training-complete (id start-time network-error)
   (stop-thread-pool)
-  (let* ((net (getf *nets* id))
-         (test-set (getf *testing* id))
-         (fitness (evaluate-inference-1hs net test-set)))
-    (with-open-file (log-stream (log-file net)
+  (let* ((environment (getf *environments* id))
+         (fitness (evaluate-inference-1hs (net environment)
+                                          (test-set environment))))
+    (with-open-file (log-stream (log-file (net environment))
                                 :direction :output
                                 :if-exists :append
                                 :if-does-not-exist :create)
@@ -1126,7 +1169,7 @@
        when (equal (thread-name thread) "thread-work")
        do (terminate-thread thread))
     (set-training-in-progress nil)
-    (collect-weights-into-file net)))
+    (collect-weights-into-file (net environment))))
   
 (defun shuffle (seq)
   "Return a sequence with the same elements as the given sequence S, but in random order (shuffled)."
@@ -1152,4 +1195,34 @@
      collect (elt vector b)))
 
 (defun net-by-id (id)
-  (getf *nets* id))
+  (net (getf *environments* id)))
+
+(defun environment-by-id (id)
+  (getf *environments* id))
+
+(defun read-png (filename &key
+                            (width 28)
+                            (height 28)
+                            (color-type :grayscale)
+                            (channels 1))
+  (loop with data-array = (data-array
+                           (make-instance
+                            'png
+                            :color-type color-type
+                            :width width
+                            :height height
+                            :image-data (png-read:image-data
+                                         (png-read:read-png-file filename))))
+     for y from 0 below height appending
+       (loop for x from 0 below width appending
+            (loop for channel from 0 below channels collecting
+                 (aref data-array x y channel)))
+     into intensity-list
+     finally (return (invert-intensity (normalize-list intensity-list)))))
+
+(defun invert-intensity (list &key (max 1.0))
+  (loop for element in list collect (- max element)))
+
+(defun normalize-list (list &key (max 255) (min 0))
+  (loop with range = (- max min)
+     for element in list collect (float (+ (/ element range) min))))
