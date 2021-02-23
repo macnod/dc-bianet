@@ -22,7 +22,12 @@
 (defparameter *continue-training* nil)
 
 (defparameter *environments* nil) ;; p-list of id -> environment
-(defparameter *pngs* nil)
+
+;; Current environment
+(defparameter *environment* nil)
+(defparameter *net* nil)
+(defparameter *training-set* nil)
+(defparameter *test-set* nil)
 
 (defun thread-work ()
   (loop for (k v) = (receive-message *job-queue*)
@@ -227,12 +232,12 @@
 (defclass t-environment ()
   ((id :accessor id :initarg :id :type keyword)
    (net :accessor net :initarg :net :type t-net)
-   (training-filename :accessor training-filename
-                      :initarg :training-filename
-                      :type string)
-   (test-filename :accessor test-filename
-                  :initarg :test-filename
+   (training-file :accessor training-file
+                  :initarg :training-file
                   :type string)
+   (test-file :accessor test-file
+              :initarg :test-file
+              :type string)
    (training-set :accessor training-set
                  :initarg :training-set
                  :initform (vector)
@@ -462,14 +467,15 @@
        for cx = (value cx-node)
        collect (weight cx))))
 
-(defun collect-weights-into-file (thing &optional filename)
-  (when (and (null filename) (equal (type-of thing) 't-net))
-    (setf filename (weights-file thing)))
-  (when (null filename)
-    (error "For other than a t-net object, you must provide the filename"))
-  (with-open-file (s-out filename :direction :output :if-exists :supersede)
+(defun collect-weights-into-file (thing &optional file)
+  (when (and (null file) (equal (type-of thing) 't-net))
+    (setf file (weights-file thing)))
+  (when (null file)
+    (error "For other than a t-net object, you must provide the file"))
+  (with-open-file (s-out file :direction :output :if-exists :supersede)
     (loop for weight in (collect-weights thing)
-       do (write-line (format nil "~f" weight) s-out))))
+       do (write-line (format nil "~f" weight) s-out)))
+  file)
 
 (defgeneric apply-weights (thing weights)
   (:method ((net t-net) (weights list))
@@ -583,9 +589,12 @@
     (collect-outputs net)))
 
 (defmethod train-frame ((net t-net) (inputs list) (expected-outputs list))
-  (infer-frame net inputs)
-  (apply-expected-outputs net expected-outputs)
-  (backpropagate net))
+  (let ((own-threads (not *thread-pool*)))
+    (when own-threads (start-thread-pool *default-thread-count*))
+    (infer-frame net inputs)
+    (apply-expected-outputs net expected-outputs)
+    (backpropagate net)
+    (when own-threads (stop-thread-pool))))
 
 (defun set-training-in-progress (thread)
   (if thread
@@ -1078,7 +1087,7 @@
 
 (defun create-environment 
     (&key 
-       (id :zero-or-one) 
+       (id :zero-or-one)
        (topology '(784 16 2))
        (home-folder (join-paths (namestring (user-homedir-pathname))
                                 "common-lisp" "dc-bianet"))
@@ -1099,12 +1108,10 @@
                                          (lambda (a b)
                                            (< (gethash a label->index)
                                               (gethash b label->index))))))))
-         (training-set (map 'vector 'identity
-                            (normalize-set
-                             (type-1-file->set training-file-name
-                                               label->expected-outputs))))
-         (test-set (normalize-set (type-1-file->set test-file-name
-                                                   label->expected-outputs)))
+         (training-set (file->training-set training-file-name
+                                           label->expected-outputs))
+         (test-set (file->test-set test-file-name
+                                   label->expected-outputs))
          (net (create-standard-net
                topology
                :id id
@@ -1113,16 +1120,47 @@
           (make-instance 't-environment
                          :id id
                          :net net
-                         :training-filename training-file-name
-                         :test-filename test-file-name
+                         :training-file training-file-name
+                         :test-file test-file-name
                          :training-set training-set
                          :test-set test-set
                          :label->index label->index
                          :label->expected-outputs label->expected-outputs
                          :index->label index->label))))
 
-(defun remove-environment (id)
-  (remf *environments* id))
+(defun update-training-set (id)
+  (let* ((env (environment-by-id id))
+         (file (training-file env))
+         (label-counts (type-1-file->label-counts file))
+         (label->index (label-counts->label-indexes label-counts))
+         (label->expected-outputs (label-outputs-hash label->index)))
+    (setf (training-set env) (file->training-set file label->expected-outputs))
+    :done))
+
+(defun file->training-set (file label->expected-outputs)
+  (map 'vector 'identity
+       (normalize-set (type-1-file->set file label->expected-outputs))))
+
+(defun file->test-set (file label->expected-outputs)
+  (normalize-set (type-1-file->set file label->expected-outputs)))
+
+(defun png-file->frame (id label file)
+  (let* ((environment (environment-by-id id))
+         (inputs (normalize-list (read-png file)))
+         (outputs (gethash label (label->expected-outputs environment))))
+    (list inputs outputs)))
+
+(defun drop-environment (id)
+  (remf *environments* id)
+  (when (and *environment* (equal (id *environment*) id))
+    (format t "~a :~(~a~) ~a~%"
+            "Current environment cleared because"
+            id "points to current environment.")
+    (setf *environment* nil)
+    (setf *net* nil)
+    (setf *training-set* nil)
+    (setf *test-set* nil))
+  (list-environments))
 
 (defun list-environments ()
   (loop for environment in *environments*
@@ -1150,6 +1188,14 @@
                   :reset-weights reset-weights))
   :training)
 
+(defun set-current-environment (id)
+  (unless (setf *environment* (environment-by-id id))
+    (error "No environment for key ~(~a~)." id))
+  (setf *net* (net *environment*)
+        *training-set* (training-set *environment*)
+        *test-set* (test-set *environment*))
+  *environment*)
+
 (defun training-complete (id start-time network-error)
   (stop-thread-pool)
   (let* ((environment (getf *environments* id))
@@ -1165,9 +1211,9 @@
               (getf fitness :percent)
               (getf fitness :pass)
               (getf fitness :total)))
-    (loop for thread in (list-all-threads)
-       when (equal (thread-name thread) "thread-work")
-       do (terminate-thread thread))
+    ;; (loop for thread in (list-all-threads)
+    ;;    when (equal (thread-name thread) "thread-work")
+    ;;    do (terminate-thread thread))
     (set-training-in-progress nil)
     (collect-weights-into-file (net environment))))
   
@@ -1200,29 +1246,81 @@
 (defun environment-by-id (id)
   (getf *environments* id))
 
-(defun read-png (filename &key
-                            (width 28)
-                            (height 28)
-                            (color-type :grayscale)
-                            (channels 1))
-  (loop with data-array = (data-array
-                           (make-instance
-                            'png
-                            :color-type color-type
-                            :width width
-                            :height height
-                            :image-data (png-read:image-data
-                                         (png-read:read-png-file filename))))
+(defun read-png (filename &key (width 28) (height 28))
+  (loop with image-data = (png-read:image-data
+                           (png-read:read-png-file filename))
+     with dimensions = (length (array-dimensions image-data))
      for y from 0 below height appending
-       (loop for x from 0 below width appending
-            (loop for channel from 0 below channels collecting
-                 (aref data-array x y channel)))
+       (loop for x from 0 below width collecting
+            (if (= dimensions 2)
+                (aref image-data x y)
+                (aref image-data x y 0)))
      into intensity-list
-     finally (return (invert-intensity (normalize-list intensity-list)))))
+     finally (return (invert-intensity intensity-list))))
 
-(defun invert-intensity (list &key (max 1.0))
+(defun invert-intensity (list &key (max 255))
   (loop for element in list collect (- max element)))
 
 (defun normalize-list (list &key (max 255) (min 0))
   (loop with range = (- max min)
      for element in list collect (float (+ (/ element range) min))))
+
+(defun inputs->png (inputs filename)
+  (loop with png = (make-instance 'png
+                                  :color-type :grayscale
+                                  :width 28
+                                  :height 28)
+     with image = (data-array png)
+     for input in inputs
+     for x = 0 then (mod (1+ x) 28)
+     for y = 0 then (if (zerop x) (1+ y) y)
+     do (setf (aref image y x 0) (- 255 (truncate (* input 255))))
+     finally (zpng:write-png png filename)))
+
+(defun add-to-training-set (id label inputs
+                            &key (update-training-set t)
+                              (count 1))
+  (let ((file (training-file (environment-by-id id))))
+    (with-open-file (out file :direction :output :if-exists :append)
+      (loop for a from 1 to count do
+           (format out "~a,~{~a~^,~}~%" label inputs)))
+    (when update-training-set (update-training-set id))))
+
+(defun denormalize-list (inputs &key (min 0) (max 255))
+  (loop with size = (- max min)
+     for input in inputs collect (truncate (+ (* input size) min))))
+
+(defun training-set->pngs (environment label count path prefix)
+  (loop for inputs in 
+       (loop with frame-count = 0
+          for frame across (training-set environment)
+          for frame-label = (outputs->label environment (second frame))
+          for is-match = (equal frame-label label)
+          when is-match collect (car frame) into input-lists
+          and do (incf frame-count)
+          when (>= frame-count count) do (return input-lists))
+     for index = 1 then (1+ index)
+     for filename = (join-paths
+                     path
+                     (format nil "~a-~a-~3,'0d.png" prefix label index))
+     do (inputs->png inputs filename)))
+
+(defun classify-pngs (environment path prefix)
+  (declare (ignore environment))
+  (loop with dir-spec = (format nil "~a-*.png" (join-paths path prefix))
+     for file in (directory dir-spec)
+     for normalized-file-data = (normalize-list (read-png file))
+     for outputs = (infer-frame *net* normalized-file-data)
+     for label = (outputs->label *environment* outputs)
+     collect (list (file-namestring file) label)))
+
+(defun train-on-png (id label file count)
+  (loop with environment = (environment-by-id id)
+     with net = (net environment)
+     with frame = (png-file->frame :digits label file)
+     with inputs = (car frame)
+     with expected-outputs = (second frame)
+     for a from 1 to count do 
+       (train-frame net inputs expected-outputs)
+     finally (return (outputs->label environment (infer-frame net inputs)))))
+
