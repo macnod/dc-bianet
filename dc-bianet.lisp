@@ -223,7 +223,6 @@
    (layer-dlist :accessor layer-dlist :type dlist :initform (make-instance 'dlist))
    (log-file :accessor log-file :initarg :log-file :initform nil)
    (weights-file :accessor weights-file :initarg :weights-file :initform nil)
-   (stop-training :accessor stop-training :type boolean :initform nil)
    (rstate :reader rstate :initform (make-random-state))
    (initial-weight-function 
     :accessor initial-weight-function
@@ -1060,30 +1059,18 @@
                         collect (if first string (read-from-string string))))))
 
 (defun join-paths (&rest path-parts)
-  (loop while (and (not (zerop (length path-parts)))
-                   (or (null (car path-parts))
-                       (zerop (length (car path-parts)))))
-       do (pop path-parts))
-  (loop for path in path-parts
-     for l = (length path)
-     for first-char = (when (> l 0) (subseq path 0 1))
-     for last-index = (when (> l 0) (1- (length path)))
-     for last-char = (when (> l 0) (subseq path last-index))
-     for path1 = (when (and first-char (> l 1))
-                   (if (equal first-char "/") (subseq path 1) path))
-     for l1 = (length path1)
-     for last-index1 = (when (> l1 0) (1- (length path1)))
-     for path2 = (when (> l1 0)
-                   (if (equal last-char "/") (subseq path1 0 last-index1) path1))
-     for l2 = (length path2)
-     when (> l2 0)
-     collecting path2 into parts
-     finally 
-       (return (format nil "~a~{~a~^/~}"
-                       (if (and (not (zerop (length (car path-parts))))
-                                (equal (subseq (car path-parts) 0 1) "/"))
-                           "/" "")
-                       parts))))
+  "Joins elements of PATH-PARTS into a file path, inserting slashes where necessary."
+  (format nil "~a~{~a~^/~}"
+          (if (scan "^/" (car path-parts)) "/" "")
+          (loop for part in path-parts
+             for first = t then nil
+             for clean-part = (if (scan "//+$" part)
+                                  (subseq part 0 (1- (length part)))
+                                  (regex-replace-all "^/+|/+$" part ""))
+             unless (or (null clean-part)
+                        (zerop (length clean-part)))
+             collect clean-part)))
+    
 
 (defun create-environment 
     (&key 
@@ -1290,20 +1277,22 @@
   (loop with size = (- max min)
      for input in inputs collect (truncate (+ (* input size) min))))
 
-(defun training-set->pngs (environment label count path prefix)
-  (loop for inputs in 
+(defun training-set->pngs (id path &key label count)
+  (loop with environment = (environment-by-id id)
+     for (frame-label inputs) in 
        (loop with frame-count = 0
           for frame across (training-set environment)
           for frame-label = (outputs->label environment (second frame))
-          for is-match = (equal frame-label label)
-          when is-match collect (car frame) into input-lists
+          for frame-inputs = (car frame)
+          for is-match = (or (null label) (equal frame-label label))
+          when is-match collect (list frame-label frame-inputs) into input-lists
           and do (incf frame-count)
-          when (>= frame-count count) do (return input-lists))
+          when (or (null count) (>= frame-count count)) do (return input-lists))
      for index = 1 then (1+ index)
-     for filename = (join-paths
-                     path
-                     (format nil "~a-~a-~3,'0d.png" prefix label index))
-     do (inputs->png inputs filename)))
+     for dir = (join-paths path frame-label)
+     for filename = (join-paths dir (format nil "~3,'0d.png" index))
+     do (ensure-directories-exist (concatenate 'string dir "/"))
+       (inputs->png inputs filename)))
 
 (defun classify-pngs (environment path prefix)
   (declare (ignore environment))
@@ -1323,4 +1312,3 @@
      for a from 1 to count do 
        (train-frame net inputs expected-outputs)
      finally (return (outputs->label environment (infer-frame net inputs)))))
-
