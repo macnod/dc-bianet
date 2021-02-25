@@ -765,11 +765,11 @@
          do (setf (aref set index) (list inputs expected-outputs))))
     set))
          
-(defun label-outputs-hash (label-indexes)
+(defun label-outputs-hash (label-index)
   (loop with label-outputs = (make-hash-table :test 'equal)
-     for label being the hash-keys in label-indexes using (hash-value index)
+     for label being the hash-keys in label-index using (hash-value index)
      do (setf (gethash label label-outputs)
-              (label->outputs label label-indexes))
+              (label->outputs label label-index))
      finally (return label-outputs)))
 
 (defun label->outputs (label label-indexes)
@@ -785,6 +785,13 @@
      for label in (sort (loop for label being the hash-keys in label-counts
                            collect label)
                         #'string<)
+     for index = 0 then (1+ index)
+     do (setf (gethash label label-indexes) index)
+     finally (return label-indexes)))
+
+(defun labels->label-indexes (list)
+  (loop with label-indexes = (make-hash-table :test 'equal)
+     for label in (sort list #'string<)
      for index = 0 then (1+ index)
      do (setf (gethash label label-indexes) index)
      finally (return label-indexes)))
@@ -1070,7 +1077,6 @@
              unless (or (null clean-part)
                         (zerop (length clean-part)))
              collect clean-part)))
-    
 
 (defun create-environment 
     (&key 
@@ -1150,8 +1156,9 @@
   (list-environments))
 
 (defun list-environments ()
-  (loop for environment in *environments*
-     collect (list :id (id environment)
+  (loop for id in *environments* by #'cddr
+     for environment in (cdr *environments*) by #'cddr
+     collect (list :id id
                    :topology (simple-topology (net environment))
                    :training-set (length (training-set environment))
                    :test-set (length (test-set environment)))))
@@ -1287,7 +1294,8 @@
           for is-match = (or (null label) (equal frame-label label))
           when is-match collect (list frame-label frame-inputs) into input-lists
           and do (incf frame-count)
-          when (or (null count) (>= frame-count count)) do (return input-lists))
+          when (and count (>= frame-count count)) do (return input-lists)
+          finally (return input-lists))
      for index = 1 then (1+ index)
      for dir = (join-paths path frame-label)
      for filename = (join-paths dir (format nil "~3,'0d.png" index))
@@ -1312,3 +1320,64 @@
      for a from 1 to count do 
        (train-frame net inputs expected-outputs)
      finally (return (outputs->label environment (infer-frame net inputs)))))
+
+(defun relative-subdirectories-of (path)
+  (loop with dir-spec = (format nil "~a~a*" path (if (scan "/$" path) "" "/"))
+     for subdirectory in (directory dir-spec)
+     when (uiop:directory-pathname-p subdirectory)
+     collect (let* ((path (directory-namestring subdirectory)))
+               (pathname-name (subseq path 0 (1- (length path)))))
+     into relative-subdirectories
+     finally (return (sort relative-subdirectories #'string<))))
+
+(defun list->key-index (string-list)
+  (loop with key-index = (make-hash-table :test 'equal)
+     for key in (sort string-list #'string<)
+     for index = 0 then (1+ index)
+     do (setf (gethash key key-index) index)
+     finally (return key-index)))
+
+(defun hash-keys (hash-table)
+  (loop for key being the hash-keys in hash-table collect key))
+
+(defun key-index->vector (hash-table)
+  (let ((keys (sort (hash-keys hash-table)
+                    (lambda (a b) (< (gethash a hash-table)
+                                     (gethash b hash-table))))))
+    (map 'vector 'identity keys)))
+       
+(defun pngs->frames-for-label (label-folder expected-outputs &key as-vector)
+  (loop with dir-spec = (format nil "~a/*.png" label-folder)
+     for file in (directory dir-spec)
+     for inputs = (normalize-list (read-png file))
+     collect (list inputs expected-outputs) into frames
+     finally (return (if as-vector
+                         (map 'vector 'identity frames)
+                         frames))))
+
+(defun pngs->frames (png-tree-path &key as-vector)
+  (loop with labels = (relative-subdirectories-of png-tree-path)
+     with label->index = (list->key-index labels)
+     with label->expected-outputs = (label-outputs-hash label->index)
+     for label in labels
+     for label-folder = (join-paths png-tree-path label)
+     for expected-outputs = (gethash label label->expected-outputs)
+     appending (pngs->training-set-for-label label-folder expected-outputs)
+     into frames
+     finally (return (if as-vector
+                         (map 'vector 'identity frames)
+                         frames))))
+
+(defun any-png-in (png-tree-path)
+  (let* ((output-labels (relative-subdirectories-of png-tree-path))
+         (dir-spec (join-paths png-tree-path (car output-labels) "*.png"))
+         (files (directory dir-spec)))
+    (car files)))
+
+(defun pngs->suggest-topology (png-tree-path)
+  (loop with output-count = (length (relative-subdirectories-of png-tree-path))
+     with input-count = (length (read-png (any-png-in png-tree-path)))
+     for power = 1 then (1+ power)
+     while (< (expt 2 power) output-count)
+     finally (return (list input-count (expt 2 (1+ power)) output-count))))
+
