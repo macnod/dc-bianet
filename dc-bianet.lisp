@@ -74,35 +74,36 @@
   (with-mutex (*job-counter-mutex*)
     *job-counter*))
 
-(defun make-random-weight-fn (&key (min 0.0) (max 1.0))
-  (declare (single-float min max))
+(defun make-random-weight-fn (&key (min -0.5) (max 0.5))
   (lambda (&key rstate
+             global-index
              global-fraction
              layer-fraction
              neuron-fraction)
-    (declare (ignore global-fraction layer-fraction neuron-fraction))
-    (+ min (the single-float (random (- max min) rstate)))))
+    (declare (ignore global-index global-fraction layer-fraction
+                     neuron-fraction))
+    (+ min (random (- max min) rstate))))
 
-(defun make-progressive-weight-fn (&key (min 0.0) (max 1.0))
+(defun make-progressive-weight-fn (&key (min -0.5) (max 0.5))
   (declare (single-float min max))
   (lambda (&key rstate
+             global-index
              global-fraction
              layer-fraction
              neuron-fraction)
-    (declare (ignore rstate global-fraction neuron-fraction)
-             (single-float layer-fraction))
+    (declare (ignore rstate global-index global-fraction neuron-fraction))
     (+ min (* layer-fraction (- max min)))))
   
-(defun make-sinusoid-weight-fn (&key (min 0.0) (max 1.0))
-  (declare (single-float min max))
+(defun make-sinusoid-weight-fn (&key (min -0.5) (max 0.5))
   (lambda (&key rstate
+             global-index
              global-fraction
              layer-fraction
              neuron-fraction)
-    (declare (ignore rstate global-fraction layer-fraction)
-             (single-float neuron-fraction))
-    (+ min (* (the single-float (sin (* neuron-fraction 3.14159265))) 
-              (- max min)))))
+    (declare (ignore rstate global-index global-fraction layer-fraction))
+    (+ (* (/ (sin (* neuron-fraction (* 2 pi))) 2)
+          (- max min))
+       min)))
 
 (defun display-float (n)
   (read-from-string (format nil "~,4f" n)))
@@ -226,7 +227,8 @@
    (rstate :reader rstate :initform (make-random-state))
    (initial-weight-function 
     :accessor initial-weight-function
-    :initform (make-progressive-weight-fn :min -0.9 :max 0.9))))
+    :initarg :initial-weight-function
+    :initform (make-progressive-weight-fn :min -0.5 :max 0.5))))
 
 (defclass t-environment ()
   ((id :accessor id :initarg :id :type keyword)
@@ -507,6 +509,7 @@
                  for neuron-index = 0 then (1+ neuron-index)
                  for weight = (funcall (initial-weight-function net)
                                        :rstate (rstate net)
+                                       :global-index global-index
                                        :global-fraction (/ (float global-index)
                                                            (float global-count))
                                        :layer-fraction (/ (float layer-index)
@@ -528,6 +531,7 @@
      for weight = (the single-float 
                        (funcall (initial-weight-function net)
                                 :rstate (rstate net)
+                                :global-index neuron-index
                                 :global-fraction 0.0
                                 :layer-fraction 0.0
                                 :neuron-fraction (/ (float neuron-index)
@@ -894,11 +898,12 @@
                               (transfer-function :relu)
                               (id (bianet-id))
                               (weight-reset-function 
-                               (make-random-weight-fn :min -0.5 :max 0.5))
+                               (make-sinusoid-weight-fn :min -0.5 :max 0.5))
                               (momentum *default-momentum*)
                               (learning-rate *default-learning-rate*))
   (loop
-     with net = (make-instance 't-net :id id)
+     with net = (make-instance 't-net :id id
+                               :initial-weight-function weight-reset-function)
      with last-layer = (1- (length succinct-topology))
      for neuron-count in succinct-topology
      for layer-index = 0 then (1+ layer-index)
@@ -911,7 +916,6 @@
                                :transfer-key transfer-key)
      do (push-tail (layer-dlist net) layer)
      finally
-       (setf (initial-weight-function net) weight-reset-function)
        (name-neurons net)
        (connect-fully net :learning-rate learning-rate :momentum momentum)
        (reset-weights net)
@@ -1078,15 +1082,16 @@
                         (zerop (length clean-part)))
              collect clean-part)))
 
-(defun create-environment 
-    (&key 
-       (id :zero-or-one)
-       (topology '(784 16 2))
+(defun create-environment
+    (id
+     topology
+     &key 
        (home-folder (join-paths (namestring (user-homedir-pathname))
                                 "common-lisp" "dc-bianet"))
        (test-file "mnist-0-1-test.csv")
        (training-file "mnist-0-1-train.csv")
-       (weight-reset-function (make-random-weight-fn :min -0.5 :max 0.5)))
+       (weight-reset-function (make-random-weight-fn :min -0.5 :max 0.5))
+       (make-current t))
   (let* ((training-file-name (join-paths home-folder training-file))
          (test-file-name (join-paths home-folder test-file))
          (label-counts (type-1-file->label-counts training-file-name))
@@ -1108,18 +1113,20 @@
          (net (create-standard-net
                topology
                :id id
-               :weight-reset-function weight-reset-function)))
-    (setf (getf *environments* id)
-          (make-instance 't-environment
-                         :id id
-                         :net net
-                         :training-file training-file-name
-                         :test-file test-file-name
-                         :training-set training-set
-                         :test-set test-set
-                         :label->index label->index
-                         :label->expected-outputs label->expected-outputs
-                         :index->label index->label))))
+               :weight-reset-function weight-reset-function))
+         (environment (make-instance 't-environment
+                                     :id id
+                                     :net net
+                                     :training-file training-file-name
+                                     :test-file test-file-name
+                                     :training-set training-set
+                                     :test-set test-set
+                                     :label->index label->index
+                                     :label->expected-outputs label->expected-outputs
+                                     :index->label index->label)))
+    (setf (getf *environments* id) environment)
+    (when make-current (set-current-environment id))
+    environment))
 
 (defun update-training-set (id)
   (let* ((env (environment-by-id id))
@@ -1380,4 +1387,12 @@
      for power = 1 then (1+ power)
      while (< (expt 2 power) output-count)
      finally (return (list input-count (expt 2 (1+ power)) output-count))))
+
+;; Environment notes
+;; '(784 24 10)  r 8 -> 2.1775 hours
+;; '(784 32 10)  r 8 -> 1.4694444 hours
+;;              s1 8 -> 2.0366666
+;;              s2 8 -> 
+;; '(784 40 10)  r 8 -> 1.9836111
+;; '(784 48 10)  r 8 -> 2.165
 
