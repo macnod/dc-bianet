@@ -1388,11 +1388,3 @@
      while (< (expt 2 power) output-count)
      finally (return (list input-count (expt 2 (1+ power)) output-count))))
 
-;; Environment notes
-;; '(784 24 10)  r 8 -> 2.1775 hours
-;; '(784 32 10)  r 8 -> 1.4694444 hours
-;;              s1 8 -> 2.0366666
-;;              s2 8 -> 
-;; '(784 40 10)  r 8 -> 1.9836111
-;; '(784 48 10)  r 8 -> 2.165
-
