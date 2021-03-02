@@ -26,6 +26,7 @@
 ;; Current environment
 (defparameter *environment* nil)
 (defparameter *net* nil)
+(defparameter *network-error* 0.0)
 (defparameter *training-set* nil)
 (defparameter *test-set* nil)
 
@@ -594,10 +595,14 @@
 (defmethod train-frame ((net t-net) (inputs list) (expected-outputs list))
   (let ((own-threads (not *thread-pool*)))
     (when own-threads (start-thread-pool *default-thread-count*))
-    (infer-frame net inputs)
-    (apply-expected-outputs net expected-outputs)
-    (backpropagate net)
-    (when own-threads (stop-thread-pool))))
+    (let* ((outputs (infer-frame net inputs))
+           (frame-error (loop for actual in outputs
+                           for expected in expected-outputs
+                           summing (expt (- expected actual) 2))))
+      (apply-expected-outputs net expected-outputs)
+      (backpropagate net)
+      (when own-threads (stop-thread-pool))
+      frame-error)))
 
 (defun set-training-in-progress (thread)
   (if thread
@@ -654,15 +659,15 @@
   (loop initially 
        (setf *continue-training* t)
      with start-time = (get-universal-time)
+     and presentation = 0
+     and last-presentation = 0
+     and sample-size = (length training-frames)
      with last-report-time = start-time
-     with presentation = 0 
-     with last-presentation = 0
-     with error-set-count = (error-subset-count training-frames)
-     with error-set = (choose-from-vector training-frames error-set-count)
+     with frame-errors = (make-array sample-size :element-type 'float :initial-element 1.0)
      for indexes = (shuffle (loop for a from 0 below (length training-frames)
                                collect a))
      for epoch from 1 to epochs
-     for network-error = (network-error net error-set)
+     for network-error = (average frame-errors)
      while (and (> network-error target-error) *continue-training*)
      do (loop 
            for index in indexes
@@ -671,8 +676,10 @@
            for elapsed-seconds = (- (get-universal-time) start-time)
            for since-last-report = (- (get-universal-time) last-report-time)
            while *continue-training*
-           do (train-frame net inputs expected-outputs)
-             (incf presentation)
+           do (when (> (aref frame-errors index) target-error)
+                (incf presentation)
+                (setf (aref frame-errors index)
+                      (train-frame net inputs expected-outputs)))
            when (funcall report-frequency 
                          epoch count presentation last-presentation 
                          elapsed-seconds since-last-report)
@@ -680,11 +687,15 @@
                        (log-file net)
                        epoch count presentation last-presentation
                        elapsed-seconds since-last-report
-                       (network-error net error-set))
+                       (average frame-errors))
              (setf last-report-time (get-universal-time))
              (setf last-presentation presentation))
      finally (return (list :start-time start-time 
                            :network-error network-error))))
+
+(defun average (v)
+  (loop for a across v summing a into total counting a into count
+     finally (return (/ total count))))
 
 (defun stop-training (id)
   (let ((log-file (log-file (net (getf *environments* id)))))
@@ -700,12 +711,18 @@
       (sleep 1)
       (set-training-in-progress nil))))
 
-(defun error-subset-count (training-frames)
+(defun error-subset-count (size training-frames)
   (let ((l (length training-frames)))
-    (cond ((> l 10000) (truncate (* l 0.05)))
-          ((> l 500) 500)
-          (t (length training-frames)))))
-
+    (case size
+      (:large (let ((m (truncate l 5)))
+                (if (< m 100)
+                    l
+                    (if (> m 1000) 1000))))
+      (:small (let* ((m (truncate l 100)))
+                (if (< m 100)
+                    (if (> l 100) 100 l)
+                    100))))))
+    
 (defun default-report-frequency (iteration count presentation last-presentation
                                  elapsed-seconds since-last-report)
   (declare (ignore iteration count presentation last-presentation 
@@ -846,16 +863,31 @@
   (:method ((net t-net) (training-frames vector))
     (evaluate-inference-1hs net (map 'list 'identity training-frames))))
   
-(defmethod network-error ((net t-net) (frames list))
-  (loop 
-     for (inputs expected-outputs) in frames
-     for outputs = (infer-frame net inputs)
-     for frame-count = 1 then (1+ frame-count)
-     for frame-error = (loop for actual in outputs
-                          for expected in expected-outputs
-                          summing (expt (- expected actual) 2))
-     summing frame-error into total-error
-     finally (return (/ total-error frame-count))))
+(defgeneric network-error (net frames)
+  (:method ((net t-net) (frames list))
+    (loop 
+       for (inputs expected-outputs) in frames
+       for outputs = (infer-frame net inputs)
+       for frame-count = 1 then (1+ frame-count)
+       for frame-error = (loop for actual in outputs
+                            for expected in expected-outputs
+                            summing (expt (- expected actual) 2))
+       summing frame-error into total-error
+       finally (return (setf *network-error* (/ total-error frame-count)))))
+  (:method ((net t-net) (frames vector))
+    (network-error net (map 'list 'identity frames))))
+
+(defgeneric faster-network-error (net frames target-error)
+  (:method ((net t-net) (frames vector) (target-error float))
+    (loop with l = (length frames)
+       for t-count = 100 then (* t-count 10)
+       for count = (if (< t-count l) t-count l)
+       for frames-subset = (choose-from-vector frames count)
+       for ne = (network-error net frames-subset)
+       while (and (< ne target-error) (< count l))
+       finally (return (values ne count))))
+  (:method ((net t-net) (frames list) (target-error float))
+    (faster-network-error net (map 'vector 'identity frames) target-error)))
 
 (defmethod infer ((net t-net) (frames list))
   (loop for frame in frames collect (infer-frame net frame)))
@@ -1206,7 +1238,7 @@
                                 :direction :output
                                 :if-exists :append
                                 :if-does-not-exist :create)
-      (format log-stream "Result: t=~ds; e=~f; pass=~$ (~d/~d)~%END~%"
+      (format log-stream "Result: t=~ds; e=~f; pass=~$% (~d/~d)~%END~%"
               (- (get-universal-time) start-time)
               network-error
               (getf fitness :percent)

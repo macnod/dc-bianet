@@ -1,13 +1,33 @@
 * dc-bianet notes
-| Hidden/IW | Threads | Host   |     Hours |
-|-----------+---------+--------+-----------|
-| 28/s2     |       8 | bianca | 0         |
-| 32/s2     |       8 | bianca | 1.4463888 |
-| 32/r      |       8 | bianca | 1.4694444 |
-| 40/r      |       8 | bianca | 1.9836111 |
-| 32/s1     |       8 | bianca | 2.0366666 |
-| 48/r      |       6 | bianca | 2.1650000 |
-| 24/r      |       8 | bianca | 2.1775000 |
-|-----------+---------+--------+-----------|
-
-
+** Various initial weight configurations, various thread counts
+ | Hidden/IW | Threads | Host   |     Hours |
+ |-----------+---------+--------+-----------|
+ | 32/s2     |       8 | bianca | 1.4463888 |
+ | 28/s2     |       8 | bianca | 1.4588889 |
+ | 32/r      |       8 | bianca | 1.4694444 |
+ | 36/s2     |       8 | bianca | 1.6933334 |
+ | 40/r      |       8 | bianca | 1.9836111 |
+ | 32/s1     |       8 | bianca | 2.0366666 |
+ | 48/r      |       6 | bianca | 2.1650000 |
+ | 24/r      |       8 | bianca | 2.1775000 |
+ |-----------+---------+--------+-----------|
+** S2 initial weight configuration, thread-count 8, host bianca
+ | Hidden |     Hours |
+ |--------+-----------|
+ |     34 | 0.9761111 |
+ |     34 | 1.3216667 |
+ |     34 | 1.0425000 |
+ |     32 | 1.4463888 |
+ |     28 | 1.4588889 |
+ |     36 | 1.6933334 |
+ |     24 | 1.7602777 |
+ |--------+-----------|
+** S2 initial weight configuration, thread count 8, host bianca, hidden 34
+** Profiling
+   | Action                       | Seconds |
+   |------------------------------+---------|
+   | infer-frame training set     |  98.181 |
+   | train-frame training set     | 204.049 |
+   | shuffle training-set indices |   0.004 |
+   | network-error training-set   |  16.550 |
+   |                              |         |
