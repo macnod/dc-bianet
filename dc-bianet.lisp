@@ -675,19 +675,22 @@
            for count = 1 then (1+ count)
            for elapsed-seconds = (- (get-universal-time) start-time)
            for since-last-report = (- (get-universal-time) last-report-time)
+           for frame-error = (aref frame-errors index)
            while *continue-training*
-           do (when (> (aref frame-errors index) target-error)
-                (incf presentation)
-                (setf (aref frame-errors index)
-                      (train-frame net inputs expected-outputs)))
+           when (> frame-error target-error)
+           do
+             (incf presentation)
+             (setf (aref frame-errors index)
+                   (train-frame net inputs expected-outputs))
            when (funcall report-frequency 
                          epoch count presentation last-presentation 
                          elapsed-seconds since-last-report)
-           do (funcall report-function
-                       (log-file net)
-                       epoch count presentation last-presentation
-                       elapsed-seconds since-last-report
-                       (average frame-errors))
+           do
+             (funcall report-function
+                      (log-file net)
+                      epoch count presentation last-presentation
+                      elapsed-seconds since-last-report
+                      (average frame-errors))
              (setf last-report-time (get-universal-time))
              (setf last-presentation presentation))
      finally (return (list :start-time start-time 
