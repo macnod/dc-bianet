@@ -8,8 +8,8 @@
 (defparameter *default-max-weight* 0.9)
 (defparameter *default-thread-count*
   (let ((count (cl-cpus:get-number-of-processors)))
-    (cond ((< count 2) 1)
-          ((< count 4) (1- count))
+    (cond ((< count 3) 1)
+          ((< count 9) (1- count))
           (t (- count 2)))))
 
 (defparameter *job-queue* nil) ;; mailbox
@@ -336,21 +336,21 @@
   (:method ((neuron t-neuron))
     (compute-neuron-error neuron)
     (adjust-neuron-cx-weights neuron)))
-          
+
 (defmethod compute-neuron-error ((neuron t-neuron))
   (let ((err (if (zerop (len (cx-dlist neuron)))
-            ;; This is an output neuron (no outgoing connections)
-            (- (expected-output neuron) (output neuron))
-            ;; This is an input-layer or hidden-layer neuron;  we need 
-            ;; to use the errors of downstream neurons to compute the
-            ;; error of this neuron
-            (loop
-               for cx-node = (head (cx-dlist neuron)) then (next cx-node)
-               while cx-node
-               for cx = (value cx-node)
-               summing (the single-float 
-                            (* (the single-float (weight cx))
-                               (the single-float (err-derivative (target cx)))))))))
+                 ;; This is an output neuron (no outgoing connections)
+                 (- (expected-output neuron) (output neuron))
+                 ;; This is an input-layer or hidden-layer neuron;  we need 
+                 ;; to use the errors of downstream neurons to compute the
+                 ;; error of this neuron
+                 (loop
+                    for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+                    while cx-node
+                    for cx = (value cx-node)
+                    summing (the single-float 
+                                 (* (the single-float (weight cx))
+                                    (the single-float (err-derivative (target cx)))))))))
     (with-mutex ((err-mtx neuron)) (setf (err neuron) err))
     (with-mutex ((err-der-mtx neuron))
       (setf (err-derivative neuron)
@@ -359,10 +359,10 @@
                                           (output neuron))))))))
 
 (defmethod adjust-neuron-cx-weights ((neuron t-neuron))
-    (loop
-       with cx-dlist = (cx-dlist neuron)
-       for cx-node = (head cx-dlist) then (next cx-node)
-       while cx-node do (adjust-cx-weight (value cx-node))))
+  (loop
+     with cx-dlist = (cx-dlist neuron)
+     for cx-node = (head cx-dlist) then (next cx-node)
+     while cx-node do (adjust-cx-weight (value cx-node))))
 
 (defmethod adjust-cx-weight ((cx t-cx))
   (let* ((delta (* (the single-float (learning-rate cx))
@@ -615,18 +615,20 @@
         (loop for thread in (list-all-threads)
            when (equal (thread-name thread) "main-training-thread")
            do (terminate-thread thread)))))
-  
+
 (defun get-training-in-progress ()
   (with-mutex (*training-in-progress-mutex*)
     *main-training-thread*))
 
-(defun train-frames (net training-frames when-complete
-                     &key
-                       (epochs 6)
-                       (target-error 0.05)
-                       (reset-weights t)
-                       (report-function #'default-report-function)
-                       (report-frequency #'default-report-frequency))
+(defmethod train-frames ((net t-net)
+                         (training-frames vector)
+                         (when-complete function)
+                         &key
+                           (epochs 6)
+                           (target-error 0.05)
+                           (reset-weights t)
+                           (report-function #'default-report-function)
+                           (report-frequency 10))
   (when (get-training-in-progress)
     (error "Training is already in progress."))
   (with-open-file (stream (log-file net)
@@ -650,12 +652,12 @@
                  (getf result :network-error))))
     :name "main-training-thread")))
 
-(defun train-frames-work (net
-                          training-frames
-                          epochs
-                          target-error
-                          report-function
-                          report-frequency)
+(defmethod train-frames-work ((net t-net)
+                              (training-frames vector)
+                              (epochs integer)
+                              (target-error float)
+                              (report-function function)
+                              (report-frequency integer))
   (loop initially 
        (setf *continue-training* t)
      with start-time = (get-universal-time)
@@ -663,12 +665,16 @@
      and last-presentation = 0
      and sample-size = (length training-frames)
      with last-report-time = start-time
-     with frame-errors = (make-array sample-size :element-type 'float :initial-element 1.0)
-     for indexes = (shuffle (loop for a from 0 below (length training-frames)
-                               collect a))
+     with frame-errors = (make-array sample-size 
+                                     :element-type 'float 
+                                     :initial-element 1.0)
+     for indexes = (shuffle (loop for a from 0 below sample-size collect a))
      for epoch from 1 to epochs
      for network-error = (average frame-errors)
-     while (and (> network-error target-error) *continue-training*)
+     while (and (or (> network-error target-error)
+                    (> (refresh-frame-errors net training-frames frame-errors)
+                       target-error))
+                *continue-training*)
      do (loop 
            for index in indexes
            for (inputs expected-outputs) = (aref training-frames index)
@@ -682,9 +688,7 @@
              (incf presentation)
              (setf (aref frame-errors index)
                    (train-frame net inputs expected-outputs))
-           when (funcall report-frequency 
-                         epoch count presentation last-presentation 
-                         elapsed-seconds since-last-report)
+           when (>= since-last-report report-frequency)
            do
              (funcall report-function
                       (log-file net)
@@ -726,12 +730,6 @@
                     (if (> l 100) 100 l)
                     100))))))
     
-(defun default-report-frequency (iteration count presentation last-presentation
-                                 elapsed-seconds since-last-report)
-  (declare (ignore iteration count presentation last-presentation 
-                   elapsed-seconds))
-  (>= since-last-report 10))
-
 (defun default-report-function (log-file iteration count 
                                 presentation last-presentation 
                                 elapsed-seconds since-last-report 
@@ -891,6 +889,16 @@
        finally (return (values ne count))))
   (:method ((net t-net) (frames list) (target-error float))
     (faster-network-error net (map 'vector 'identity frames) target-error)))
+
+(defmethod refresh-frame-errors ((net t-net) (frames vector) (frame-errors vector))
+  (loop for (inputs expected-outputs) across frames
+     for outputs = (infer-frame net inputs)
+     for index = 0 then (1+ index)
+     for frame-error = (loop for actual in outputs
+                          for expected in expected-outputs
+                          summing (expt (- expected actual) 2))
+     do (setf (aref frame-errors index) frame-error)
+     finally (return (average frame-errors))))
 
 (defmethod infer ((net t-net) (frames list))
   (loop for frame in frames collect (infer-frame net frame)))
@@ -1209,7 +1217,8 @@
                    (target-error 0.05)
                    (reset-weights t)
                    weights-file
-                   (thread-count *default-thread-count*))
+                   (thread-count *default-thread-count*)
+                   (report-frequency 10))
   (let ((environment (getf *environments* id)))
     (when (not environment) (error "No such environment ~(~a~)" id))
     (when weights-file
@@ -1221,7 +1230,8 @@
                   #'training-complete
                   :epochs epochs
                   :target-error target-error
-                  :reset-weights reset-weights))
+                  :reset-weights reset-weights
+                  :report-frequency report-frequency))
   :training)
 
 (defun set-current-environment (id)
