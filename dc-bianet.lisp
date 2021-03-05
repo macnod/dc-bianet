@@ -604,6 +604,38 @@
       (when own-threads (stop-thread-pool))
       frame-error)))
 
+(defmethod train-bad-frame ((net t-net)
+                            (inputs list)
+                            (expected-outputs list)
+                            (target-error float))
+  (let ((own-threads (not *thread-pool*)))
+    (when own-threads (start-thread-pool *default-thread-count*))
+    (let* ((outputs (infer-frame net inputs))
+           (frame-error (loop for actual in outputs
+                           for expected in expected-outputs
+                           summing (expt (- expected actual) 2))))
+      (when (> frame-error target-error)
+        (apply-expected-outputs net expected-outputs)
+        (backpropagate net))
+      (when own-threads (stop-thread-pool))
+      frame-error)))
+
+(defmethod train-bad-frame-1 ((net t-net)
+                              (inputs list)
+                              (expected-outputs list)
+                              (target-error float))
+  (let ((own-threads (not *thread-pool*)))
+    (when own-threads (start-thread-pool *default-thread-count*))
+    (let* ((outputs (infer-frame net inputs))
+           (frame-error (loop for actual in outputs
+                           for expected in expected-outputs
+                           summing (expt (- expected actual) 2))))
+      (when (> frame-error target-error)
+        (apply-expected-outputs net expected-outputs)
+        (backpropagate net))
+      (when own-threads (stop-thread-pool))
+      (sqrt frame-error))))
+
 (defun set-training-in-progress (thread)
   (if thread
       (with-mutex (*training-in-progress-mutex*)
@@ -628,7 +660,8 @@
                            (target-error 0.05)
                            (reset-weights t)
                            (report-function #'default-report-function)
-                           (report-frequency 10))
+                           (report-frequency 10)
+                           (skip-refresh t))
   (when (get-training-in-progress)
     (error "Training is already in progress."))
   (with-open-file (stream (log-file net)
@@ -645,7 +678,8 @@
                                        epochs 
                                        target-error 
                                        report-function 
-                                       report-frequency)))
+                                       report-frequency
+                                       skip-refresh)))
         (funcall when-complete
                  (id net)
                  (getf result :start-time) 
@@ -657,7 +691,8 @@
                               (epochs integer)
                               (target-error float)
                               (report-function function)
-                              (report-frequency integer))
+                              (report-frequency integer)
+                              (skip-refresh t))
   (loop initially 
        (setf *continue-training* t)
      with start-time = (get-universal-time)
@@ -671,10 +706,13 @@
      for indexes = (shuffle (loop for a from 0 below sample-size collect a))
      for epoch from 1 to epochs
      for network-error = (average frame-errors)
-     while (and (or (> network-error target-error)
+     while (and
+            (if skip-refresh
+                (> network-error target-error)
+                (or (> network-error target-error)
                     (> (refresh-frame-errors net training-frames frame-errors)
-                       target-error))
-                *continue-training*)
+                       target-error)))
+            *continue-training*)
      do (loop 
            for index in indexes
            for (inputs expected-outputs) = (aref training-frames index)
@@ -687,7 +725,7 @@
            do
              (incf presentation)
              (setf (aref frame-errors index)
-                   (train-frame net inputs expected-outputs))
+                   (train-bad-frame net inputs expected-outputs target-error))
            when (>= since-last-report report-frequency)
            do
              (funcall report-function
@@ -1218,7 +1256,8 @@
                    (reset-weights t)
                    weights-file
                    (thread-count *default-thread-count*)
-                   (report-frequency 10))
+                   (report-frequency 10)
+                   (skip-refresh t))
   (let ((environment (getf *environments* id)))
     (when (not environment) (error "No such environment ~(~a~)" id))
     (when weights-file
@@ -1231,7 +1270,8 @@
                   :epochs epochs
                   :target-error target-error
                   :reset-weights reset-weights
-                  :report-frequency report-frequency))
+                  :report-frequency report-frequency
+                  :skip-refresh skip-refresh))
   :training)
 
 (defun set-current-environment (id)
