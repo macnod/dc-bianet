@@ -260,7 +260,11 @@
                             :type hashtable)
    (index->label :accessor index->label
                  :initarg :index->label
-                 :type vector)))
+                 :type vector)
+   (training-error :accessor training-error
+                   :type list
+                   :initarg :training-error
+                   :initform nil)))
 
 (defmethod default-log-file-name ((net t-net))
   (format nil "~atmp/~(~a~)-~{~a~^-~}.log"
@@ -640,7 +644,7 @@
   (with-mutex (*training-in-progress-mutex*)
     *main-training-thread*))
 
-(defmethod train-frames ((net t-net)
+(defmethod train-frames ((environment t-environment)
                          (training-frames vector)
                          (when-complete function)
                          &key
@@ -652,7 +656,7 @@
                            (skip-refresh t))
   (when (get-training-in-progress)
     (error "Training is already in progress."))
-  (with-open-file (stream (log-file net)
+  (with-open-file (stream (log-file (net environment))
                           :direction :output
                           :if-does-not-exist :create
                           :if-exists :append)
@@ -660,8 +664,8 @@
   (set-training-in-progress
    (make-thread
     (lambda ()
-      (when reset-weights (reset-weights net))
-      (let ((result (train-frames-work net 
+      (when reset-weights (reset-weights (net environment)))
+      (let ((result (train-frames-work environment
                                        training-frames
                                        epochs 
                                        target-error 
@@ -669,12 +673,12 @@
                                        report-frequency
                                        skip-refresh)))
         (funcall when-complete
-                 (id net)
+                 (id environment)
                  (getf result :start-time) 
                  (getf result :network-error))))
     :name "main-training-thread")))
 
-(defmethod train-frames-work ((net t-net)
+(defmethod train-frames-work ((environment t-environment)
                               (training-frames vector)
                               (epochs integer)
                               (target-error float)
@@ -683,7 +687,8 @@
                               (skip-refresh t))
   (loop initially 
        (setf *continue-training* t)
-     with start-time = (get-universal-time)
+     with net = (net environment)
+     and start-time = (get-universal-time)
      and presentation = 0
      and last-presentation = 0
      and sample-size = (length training-frames)
@@ -717,7 +722,7 @@
            when (>= since-last-report report-frequency)
            do
              (funcall report-function
-                      (log-file net)
+                      environment
                       epoch count presentation last-presentation
                       elapsed-seconds since-last-report
                       (average frame-errors))
@@ -756,14 +761,15 @@
                     (if (> l 100) 100 l)
                     100))))))
     
-(defun default-report-function (log-file iteration count 
+(defun default-report-function (environment iteration count 
                                 presentation last-presentation 
                                 elapsed-seconds since-last-report 
                                 network-error)
   (let ((rate (if (zerop since-last-report)
                   0
-                  (/ (- presentation last-presentation) since-last-report))))
-    (with-open-file (log-stream log-file 
+                  (/ (- presentation last-presentation) since-last-report)))
+        (filename (log-file (net environment))))
+    (with-open-file (log-stream filename
                                 :direction :output 
                                 :if-exists :append 
                                 :if-does-not-exist :create)
@@ -771,6 +777,18 @@
               elapsed-seconds iteration count presentation rate
               network-error))))
 
+(defun plotting-report-function (environment iteration count 
+                                 presentation last-presentation 
+                                 elapsed-seconds since-last-report 
+                                 network-error)
+  (push network-error (training-error environment))
+  (when (> (length (training-error environment)) 20) (axis (list t t t t)))
+  (plot (reverse (training-error environment)))
+  (default-report-function environment iteration count 
+                           presentation last-presentation 
+                           elapsed-seconds since-last-report 
+                           network-error))
+  
 (defgeneric normalize-set (set)
   (:method ((set list))
     (loop with max-value = (loop for frame in set
@@ -1302,14 +1320,19 @@
     (when weights-file
       (apply-weights-from-file (net environment) weights-file)
       (setf reset-weights nil))
+    (setf (training-error environment) nil)
+    (title (format nil "~(~a~) ~{~a~^-~} Training Error"
+                   id (simple-topology (net environment))))
+    (axis (list 0 20))
     (start-thread-pool thread-count)
-    (train-frames (net environment)
+    (train-frames environment
                   (training-set environment)
                   #'training-complete
                   :epochs epochs
                   :target-error target-error
                   :reset-weights reset-weights
                   :report-frequency report-frequency
+                  :report-function #'plotting-report-function
                   :skip-refresh skip-refresh))
   :training)
 
@@ -1326,6 +1349,8 @@
   (let* ((environment (getf *environments* id))
          (fitness (evaluate-inference-1hs (net environment)
                                           (test-set environment))))
+    (push network-error (training-error environment))
+    (plot (reverse (training-error environment)))
     (with-open-file (log-stream (log-file (net environment))
                                 :direction :output
                                 :if-exists :append

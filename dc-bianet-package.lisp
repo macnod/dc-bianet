@@ -1,4 +1,12 @@
 ;;;; dc-bianet-package.lisp
 
 (defpackage :dc-bianet
-  (:use :cl :sb-thread :sb-concurrency :dc-dlist :cl-cpus :zpng :cl-ppcre))
+  (:use :cl
+        :cl-cpus
+        :cl-ppcre
+        :dc-dlist
+        :sb-concurrency
+        :sb-thread
+        :vgplot
+        :zpng
+        ))

@@ -1,6 +1,6 @@
 ;;;; dc-bianet.asd
 
-(ql:quickload '(:cl-cpus :zpng :png-read :cl-ppcre))
+(ql:quickload '(:cl-cpus :zpng :png-read :vgplot :cl-ppcre))
 (asdf:defsystem #:dc-bianet
   :description "Flexible multilayer backprop neural network simulation."
   :author "Donnie Cameron <macnod@gmail.com>"
@@ -9,7 +9,8 @@
                #:dc-dlist 
                #:cl-cpus 
                #:zpng 
-               #:png-read 
+               #:png-read
+               #:vgplot
                #:cl-ppcre)
   :serial t
   :components ((:file "dc-bianet-package")
