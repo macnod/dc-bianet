@@ -58,3 +58,6 @@ flycheck_*.el
 
 # csv files
 *.csv
+
+# other
+*.dat
