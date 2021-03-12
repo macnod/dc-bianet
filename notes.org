@@ -73,9 +73,9 @@
    |            64 |           64 |       7 |   0.04 | Y            | 16.550000 |    96.12 |
    |            64 |           64 |       7 |   0.04 | N            | 30.950000 |    97.15 |
    |           128 |          128 |       7 |   0.04 | Y            | 54.566667 |    94.11 |
+   |           128 |          128 |       7 |   0.04 | N            | 98.550000 |    96.83 |
 
-   |           128 |          128 |       7 |   0.04 | N            |           |          |
-
+   
 
    #+begin_src sqlite :db /tmp/after_skip_refresh.db :var orgtable=after_skip_refresh :colnames yes
    drop table if exists asr;
@@ -90,52 +90,87 @@
    .mode csv asr
    .import $orgtable asr
    select 
-     hidden_layers || skip_refresh || target as attributes, 
-     (accuracy - 90) / 6 as normalized_accuracy, 
-     minutes / 60 as normalized_minutes
+     hidden_layers || ' ' || skip_refresh || ' ' || target as attributes, 
+     (accuracy - 91) / 9 as "normalized accuracy", 
+     1 - (minutes / (select max(minutes) from asr)) as "normalized minutes"
    from asr order by accuracy desc;
    #+end_src
 
    #+plot: type:2d ind:1 with:histogram
-   #+plot: set:"ylabel 'Accuracy'" set:"y2label 'TimeA'" set:"y2range [0:60]" set:"style fill pattern 4"
+   #+plot: set:"ylabel 'Accuracy'"
+   #+plot: set:"style fill pattern 4" set:"xtics rotate"
    #+RESULTS:
-   | attributes | normalized_accuracy | normalized_minutes |
-   |------------+---------------------+--------------------|
-   | 64N0.04    |    1.19166666666667 |  0.515833333333333 |
-   | 40N0.04    |               1.155 |             0.7725 |
-   | 64N0.05    |    1.14666666666667 |         0.49305555 |
-   | 40N0.05    |    1.12666666666667 |  0.554722216666667 |
-   | 32N0.05    |                1.12 |                0.7 |
-   | 40N0.06    |    1.09666666666667 |  0.338333333333333 |
-   | 128N0.05   |                1.09 |  0.880277783333333 |
-   | 128Y0.05   |                1.06 |  0.372222216666667 |
-   | 64Y0.05    |    1.02166666666667 |  0.271666666666667 |
-   | 64Y0.04    |                1.02 |  0.275833333333333 |
-   | 64 32N0.05 |    1.00333333333333 |  0.464722216666667 |
-   | 40Y0.05    |   0.981666666666667 |  0.204166666666667 |
-   | 40Y0.04    |   0.916666666666667 |  0.228611116666667 |
-   | 40Y0.06    |   0.903333333333334 |  0.167222216666667 |
-   | 64 32Y0.05 |   0.854999999999999 |         0.32694445 |
-   | 32Y0.05    |                0.81 |  0.229166666666667 |
-   | 128Y0.04   |               0.685 |         0.90944445 |
-
-
-#+PLOT: title:"Citas" ind:1 deps:(2 3) type:2d with:histograms set:"yrange [0:]"
-| Sede      | Max cites | H-index |
-|-----------+-----------+---------|
-| Chile     |    257.72 |   21.39 |
-| Leeds     |    165.77 |   19.68 |
-| São Paolo |     71.00 |   11.50 |
-| Stockholm |    134.19 |   14.33 |
-| Morelia   |    257.56 |   17.67 |
-
-
-
+   | attributes   | normalized accuracy | normalized minutes |
+   |--------------+---------------------+--------------------|
+   | 64 N 0.04    |   0.683333333333334 |  0.685946220192795 |
+   | 40 N 0.04    |    0.65888888888889 |  0.529680365296804 |
+   | 64 N 0.05    |   0.653333333333333 |   0.69981397260274 |
+   | 128 N 0.04   |   0.647777777777778 |                0.0 |
+   | 40 N 0.05    |   0.640000000000001 |  0.662269578893962 |
+   | 32 N 0.05    |   0.635555555555555 |  0.573820395738204 |
+   | 40 N 0.06    |                0.62 |  0.794013191273465 |
+   | 128 N 0.05   |   0.615555555555556 |  0.464062232369356 |
+   | 128 Y 0.05   |   0.595555555555556 |  0.773380690005074 |
+   | 64 Y 0.05    |                0.57 |  0.834601725012684 |
+   | 64 Y 0.04    |   0.568888888888889 |  0.832064941653983 |
+   | 64 32 N 0.05 |   0.557777777777777 |  0.717064099441908 |
+   | 40 Y 0.05    |   0.543333333333333 |  0.875697615423643 |
+   | 40 Y 0.04    |                 0.5 |  0.860815149670218 |
+   | 40 Y 0.06    |   0.491111111111111 |  0.898190431253171 |
+   | 64 32 Y 0.05 |   0.458888888888888 |  0.800947062404871 |
+   | 32 Y 0.05    |   0.428888888888889 |  0.860476915271436 |
+   | 128 Y 0.04   |   0.345555555555556 |  0.446304748858447 |
 
 
 ** after train-bad-frame-1
-   | Hidden | Threads | Target | Skip Refresh | Minutes | Accuracy |
-   |--------+---------+--------+--------------+---------+----------|
-   |     40 |       7 |    0.5 | Yes          |         |          |
-   |     40 |       7 |    0.4 | Yes          |         |          |
-   |     40 |       7 |    0.6 | Yes          |         |          |
+   threads: 7
+   target: 0.05
+   #+name: bad_frame
+   | hidden_layers | hidden_count | bad_frame | skip_refresh |   minutes | accuracy |
+   |---------------+--------------+-----------+--------------+-----------+----------|
+   |           128 |          128 |         0 | Y            | 22.333333 |    96.36 |
+   |           128 |          128 |         0 | N            | 52.816667 |    96.54 |
+   |            40 |           40 |         0 | Y            | 12.250000 |    95.89 |
+   |            40 |           40 |         0 | N            | 33.283333 |    96.76 |
+   |            64 |           64 |         0 | Y            | 16.300000 |    96.13 |
+   |            64 |           64 |         0 | N            | 29.583333 |    96.88 |
+   |            40 |           40 |         1 | Y            | 45.083333 |    96.69 |
+   |            40 |           40 |         1 | N            | 50.200000 |    96.59 |
+   |            64 |           64 |         1 | Y            | 43.850000 |    96.54 |
+   |         32 16 |           48 |         0 | N            | 44.000000 |    95.98 |
+   |   64 48 32 16 |          160 |         0 | N            | 59.850000 |    95.98 |
+
+   #+begin_src sqlite :db /tmp/bad_frame.db :var orgtable=bad_frame :colnames yes
+   drop table if exists tbf;
+   create table tbf (
+     hidden_layers text, 
+     hidden_count integer
+     bad_frame integer,
+     skip_refresh text,
+     minutes real,
+     accuracy real);
+   .mode csv tbf
+   .import $orgtable tbf
+   select 
+     hidden_layers || ' ' || bad_frame as attributes, 
+     (accuracy - 94) / 6 as "normalized accuracy", 
+     minutes / 60 as minutes
+   from tbf order by accuracy desc;
+   #+end_src
+
+   #+plot: type:2d ind:1 with:histogram
+   #+plot: set:"ylabel 'Accuracy'" set:"yrange [0.0:1.0]" set:"ytics [94:100]"
+   #+plot: set:"style fill pattern 4" set:"xtics rotate"
+   #+plot: set:"y2range [0:60]" set:"y2tics auto"
+   #+RESULTS:
+   | attributes | normalized accuracy |           minutes |
+   |------------+---------------------+-------------------|
+   | 64 0       |   0.479999999999999 |        0.49305555 |
+   | 40 0       |   0.460000000000001 | 0.554722216666667 |
+   | 40 1       |   0.448333333333333 | 0.751388883333333 |
+   | 40 1       |   0.431666666666667 | 0.836666666666667 |
+   | 128 0      |   0.423333333333334 | 0.880277783333333 |
+   | 64 1       |   0.423333333333334 | 0.730833333333333 |
+   | 128 0      |   0.393333333333333 | 0.372222216666667 |
+   | 64 0       |   0.354999999999999 | 0.271666666666667 |
+   | 40 0       |               0.315 | 0.204166666666667 |

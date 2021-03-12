@@ -229,7 +229,11 @@
    (initial-weight-function 
     :accessor initial-weight-function
     :initarg :initial-weight-function
-    :initform (make-progressive-weight-fn :min -0.5 :max 0.5))))
+    :initform (make-progressive-weight-fn :min -0.5 :max 0.5))
+   (connect-function
+    :accessor connect-function
+    :initarg :connect-function
+    :initform (error ":connect-function is required"))))
 
 (defclass t-environment ()
   ((id :accessor id :initarg :id :type keyword)
@@ -620,22 +624,6 @@
       (when own-threads (stop-thread-pool))
       frame-error)))
 
-(defmethod train-bad-frame-1 ((net t-net)
-                              (inputs list)
-                              (expected-outputs list)
-                              (target-error float))
-  (let ((own-threads (not *thread-pool*)))
-    (when own-threads (start-thread-pool *default-thread-count*))
-    (let* ((outputs (infer-frame net inputs))
-           (frame-error (loop for actual in outputs
-                           for expected in expected-outputs
-                           summing (expt (- expected actual) 2))))
-      (when (> frame-error target-error)
-        (apply-expected-outputs net expected-outputs)
-        (backpropagate net))
-      (when own-threads (stop-thread-pool))
-      (sqrt frame-error))))
-
 (defun set-training-in-progress (thread)
   (if thread
       (with-mutex (*training-in-progress-mutex*)
@@ -981,10 +969,26 @@
                               (weight-reset-function 
                                (make-sinusoid-weight-fn :min -0.5 :max 0.5))
                               (momentum *default-momentum*)
-                              (learning-rate *default-learning-rate*))
+                              (learning-rate *default-learning-rate*)
+                              (cx-mode :full)
+                              (cx-params 12))
   (loop
+     with connect-function = (case cx-mode
+                               (:full (lambda (net)
+                                        (connect-fully
+                                         net
+                                         :learning-rate learning-rate
+                                         :momentum momentum)))
+                               (:partial (lambda (net)
+                                           (connect-mostly
+                                            net
+                                            :learning-rate learning-rate
+                                            :momentum momentum
+                                            :skip-modulus cx-params)))
+                               (otherwise (error "Unknown cx-mode ~(~a~)." cx-mode)))
      with net = (make-instance 't-net :id id
-                               :initial-weight-function weight-reset-function)
+                               :initial-weight-function weight-reset-function
+                               :connect-function connect-function)
      with last-layer = (1- (length succinct-topology))
      for neuron-count in succinct-topology
      for layer-index = 0 then (1+ layer-index)
@@ -998,7 +1002,7 @@
      do (push-tail (layer-dlist net) layer)
      finally
        (name-neurons net)
-       (connect-fully net :learning-rate learning-rate :momentum momentum)
+       (funcall (connect-function net) net)
        (reset-weights net)
        (create-gates net)
        (setf (log-file net) (default-log-file-name net))
@@ -1047,6 +1051,33 @@
                 for target = (value target-node)
                 when (not (biased target))
                 do
+                  (push-tail 
+                   (cx-dlist source)
+                   (make-instance 
+                    't-cx 
+                    :source source 
+                    :target target
+                    :learning-rate learning-rate
+                    :momentum momentum))))))
+
+(defun connect-mostly (net &key 
+                             (learning-rate *default-learning-rate*)
+                             (momentum *default-momentum*)
+                             (skip-modulus 13))
+  (loop with index = 0
+     for layer-node = (head (layer-dlist net)) then (next layer-node)
+     while (next layer-node)
+     for layer = (value layer-node)
+     for next-layer = (value (next layer-node))
+     do (loop for source-node = (head layer) then (next source-node)
+           while source-node do 
+             (loop for target-node = (head next-layer) then (next target-node)
+                while target-node
+                for source = (value source-node)
+                for target = (value target-node)
+                when (and (not (biased target))
+                          (not (zerop (mod (incf index) skip-modulus))))
+                do 
                   (push-tail 
                    (cx-dlist source)
                    (make-instance 
@@ -1172,7 +1203,11 @@
        (test-file "mnist-0-1-test.csv")
        (training-file "mnist-0-1-train.csv")
        (weight-reset-function (make-random-weight-fn :min -0.5 :max 0.5))
-       (make-current t))
+       (make-current t)
+       (cx-mode :full)
+       (cx-params 12)
+       (learning-rate *default-learning-rate*)
+       (momentum *default-momentum*))
   (let* ((training-file-name (join-paths home-folder training-file))
          (test-file-name (join-paths home-folder test-file))
          (label-counts (type-1-file->label-counts training-file-name))
@@ -1194,7 +1229,11 @@
          (net (create-standard-net
                topology
                :id id
-               :weight-reset-function weight-reset-function))
+               :weight-reset-function weight-reset-function
+               :cx-mode cx-mode
+               :cx-params cx-params
+               :learning-rate learning-rate
+               :momentum momentum))
          (environment (make-instance 't-environment
                                      :id id
                                      :net net
@@ -1257,7 +1296,7 @@
                    weights-file
                    (thread-count *default-thread-count*)
                    (report-frequency 10)
-                   (skip-refresh t))
+                   skip-refresh)
   (let ((environment (getf *environments* id)))
     (when (not environment) (error "No such environment ~(~a~)" id))
     (when weights-file
