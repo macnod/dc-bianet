@@ -174,3 +174,24 @@
    | 128 0      |   0.393333333333333 | 0.372222216666667 |
    | 64 0       |   0.354999999999999 | 0.271666666666667 |
    | 40 0       |               0.315 | 0.204166666666667 |
+
+** To Do
+*** DONE (network-error environment)  
+**** should track elapsed-seconds, presentation, and network-error
+**** should be a dlist
+**** should have a limited size
+     An element from the beginning of the list should be removed when
+     adding an element to the end of the list causes the list to
+     exceed the size limit.
+***** There should be a function for adding an error
+***** Reporting function plotting loop needs to be modified for dlist
+**** plotting should be an option in the train function
+*** Consider using mcclim again, for plotting and other things
+*** Train from PNGs and training directory structure
+*** Try other data sets
+*** Incorporate convolutions
+*** Revisit architecture
+**** ID vs net or environment objects
+**** What goes in net vs environment
+
+

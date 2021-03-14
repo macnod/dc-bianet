@@ -262,9 +262,34 @@
                  :initarg :index->label
                  :type vector)
    (training-error :accessor training-error
-                   :type list
-                   :initarg :training-error
-                   :initform nil)))
+                   :type dlist
+                   :initform (make-instance 'dlist))
+   (training-error-limit :accessor training-error-limit
+                         :type integer
+                         :initarg :training-error-limit
+                         :initform 1000)
+   (plot-errors :accessor plot-errors
+                :initarg :plot-errors
+                :initform t)))
+                
+
+(defmethod add-training-error ((environment t-environment)
+                               (elapsed-seconds integer)
+                               (presentation integer)
+                               (network-error float))
+  (push-tail (training-error environment)
+             (list elapsed-seconds presentation network-error))
+  (when (> (len (training-error environment))
+           (training-error-limit environment))
+    (pop-head (training-error environment))))
+
+(defmethod plot-training-error ((environment t-environment))
+  (loop for node = (head (training-error environment)) then (next node)
+     while node
+     for (elapsed presentation network-error) = (value node)
+     collect elapsed into elapsed-seconds
+     collect network-error into network-error-list
+     finally (funcall #'plot elapsed-seconds network-error-list)))
 
 (defmethod default-log-file-name ((net t-net))
   (format nil "~atmp/~(~a~)-~{~a~^-~}.log"
@@ -760,7 +785,7 @@
                 (if (< m 100)
                     (if (> l 100) 100 l)
                     100))))))
-    
+
 (defun default-report-function (environment iteration count 
                                 presentation last-presentation 
                                 elapsed-seconds since-last-report 
@@ -781,14 +806,17 @@
                                  presentation last-presentation 
                                  elapsed-seconds since-last-report 
                                  network-error)
-  (push network-error (training-error environment))
-  (when (> (length (training-error environment)) 20) (axis (list t t t t)))
-  (plot (reverse (training-error environment)))
+  (add-training-error environment
+                      elapsed-seconds
+                      presentation
+                      network-error)
+  (when (plot-errors environment)
+    (plot-training-error environment))
   (default-report-function environment iteration count 
                            presentation last-presentation 
                            elapsed-seconds since-last-report 
                            network-error))
-  
+
 (defgeneric normalize-set (set)
   (:method ((set list))
     (loop with max-value = (loop for frame in set
@@ -1308,22 +1336,27 @@
                    :training-set (length (training-set environment))
                    :test-set (length (test-set environment)))))
 
-(defun train (id &key (epochs 100)
+(defun train (id &key
+                   (epochs 100)
                    (target-error 0.05)
                    (reset-weights t)
-                   weights-file
                    (thread-count *default-thread-count*)
+                   (report-function #'plotting-report-function)
                    (report-frequency 10)
+                   (plot-errors t)
+                   weights-file
                    skip-refresh)
   (let ((environment (getf *environments* id)))
     (when (not environment) (error "No such environment ~(~a~)" id))
     (when weights-file
       (apply-weights-from-file (net environment) weights-file)
       (setf reset-weights nil))
-    (setf (training-error environment) nil)
-    (title (format nil "~(~a~) ~{~a~^-~} Training Error"
-                   id (simple-topology (net environment))))
-    (axis (list 0 20))
+    (clear (training-error environment))
+    (setf (plot-errors environment) plot-errors)
+    (when (plot-errors environment)
+      (title (format nil "~(~a~) ~{~a~^-~} Training Error"
+                     id (simple-topology (net environment))))
+      (axis (list t t 0 1.0)))
     (start-thread-pool thread-count)
     (train-frames environment
                   (training-set environment)
@@ -1332,7 +1365,7 @@
                   :target-error target-error
                   :reset-weights reset-weights
                   :report-frequency report-frequency
-                  :report-function #'plotting-report-function
+                  :report-function report-function
                   :skip-refresh skip-refresh))
   :training)
 
