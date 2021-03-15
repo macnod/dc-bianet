@@ -186,6 +186,7 @@
 ***** There should be a function for adding an error
 ***** Reporting function plotting loop needs to be modified for dlist
 **** plotting should be an option in the train function
+*** Play with sinusoid initial weight generation
 *** Consider using mcclim again, for plotting and other things
 *** Train from PNGs and training directory structure
 *** Try other data sets

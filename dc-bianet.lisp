@@ -96,15 +96,19 @@
     (+ min (* layer-fraction (- max min)))))
   
 (defun make-sinusoid-weight-fn (&key (min -0.5) (max 0.5))
+  (declare (single-float min max))
   (lambda (&key rstate
              global-index
              global-fraction
              layer-fraction
              neuron-fraction)
-    (declare (ignore rstate global-index global-fraction layer-fraction))
-    (+ (* (/ (sin (* neuron-fraction (* 2 pi))) 2)
-          (- max min))
-       min)))
+    (declare (ignore rstate global-index global-fraction layer-fraction)
+             (single-float neuron-fraction))
+    (let* ((range (- max min))
+           (2pi (* 2 (coerce pi 'single-float)))
+           (x (* neuron-fraction 2pi))
+           (sinx (sin x)))
+      (+ (* (/ (+ sinx 1) 2) range) min))))
 
 (defun display-float (n)
   (read-from-string (format nil "~,4f" n)))
@@ -699,6 +703,7 @@
                                        skip-refresh)))
         (funcall when-complete
                  (id environment)
+                 (getf result :presentations)
                  (getf result :start-time) 
                  (getf result :network-error))))
     :name "main-training-thread")))
@@ -753,7 +758,8 @@
                       (average frame-errors))
              (setf last-report-time (get-universal-time))
              (setf last-presentation presentation))
-     finally (return (list :start-time start-time 
+     finally (return (list :presentations presentation
+                           :start-time start-time 
                            :network-error network-error))))
 
 (defun average (v)
@@ -1348,10 +1354,11 @@
                    skip-refresh)
   (let ((environment (getf *environments* id)))
     (when (not environment) (error "No such environment ~(~a~)" id))
+    (when (or reset-weights (not weights-file))
+      (clear (training-error environment)))
     (when weights-file
       (apply-weights-from-file (net environment) weights-file)
       (setf reset-weights nil))
-    (clear (training-error environment))
     (setf (plot-errors environment) plot-errors)
     (when (plot-errors environment)
       (title (format nil "~(~a~) ~{~a~^-~} Training Error"
@@ -1377,13 +1384,14 @@
         *test-set* (test-set *environment*))
   *environment*)
 
-(defun training-complete (id start-time network-error)
+(defun training-complete (id presentation start-time network-error)
   (stop-thread-pool)
   (let* ((environment (getf *environments* id))
          (fitness (evaluate-inference-1hs (net environment)
-                                          (test-set environment))))
-    (push network-error (training-error environment))
-    (plot (reverse (training-error environment)))
+                                          (test-set environment)))
+         (elapsed-seconds (- (get-universal-time) start-time)))
+    (add-training-error environment elapsed-seconds presentation network-error)
+    (plot-training-error environment)
     (with-open-file (log-stream (log-file (net environment))
                                 :direction :output
                                 :if-exists :append
@@ -1394,9 +1402,6 @@
               (getf fitness :percent)
               (getf fitness :pass)
               (getf fitness :total)))
-    ;; (loop for thread in (list-all-threads)
-    ;;    when (equal (thread-name thread) "thread-work")
-    ;;    do (terminate-thread thread))
     (set-training-in-progress nil)
     (collect-weights-into-file (net environment))))
   
