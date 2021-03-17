@@ -123,39 +123,51 @@
 
 
 ** after train-bad-frame-1
+     -- select 
+     --   hidden_layers || ' ' || bad_frame as attributes, 
+     --   (accuracy - 94) / 6 as "normalized accuracy", 
+     --   minutes / 60 as minutes
+     -- from tbf order by accuracy desc;
    threads: 7
    target: 0.05
+
    #+name: bad_frame
-   | hidden_layers | hidden_count | bad_frame | skip_refresh |   minutes | accuracy |
-   |---------------+--------------+-----------+--------------+-----------+----------|
-   |           128 |          128 |         0 | Y            | 22.333333 |    96.36 |
-   |           128 |          128 |         0 | N            | 52.816667 |    96.54 |
-   |            40 |           40 |         0 | Y            | 12.250000 |    95.89 |
-   |            40 |           40 |         0 | N            | 33.283333 |    96.76 |
-   |            64 |           64 |         0 | Y            | 16.300000 |    96.13 |
-   |            64 |           64 |         0 | N            | 29.583333 |    96.88 |
-   |            40 |           40 |         1 | Y            | 45.083333 |    96.69 |
-   |            40 |           40 |         1 | N            | 50.200000 |    96.59 |
-   |            64 |           64 |         1 | Y            | 43.850000 |    96.54 |
-   |         32 16 |           48 |         0 | N            | 44.000000 |    95.98 |
-   |   64 48 32 16 |          160 |         0 | N            | 59.850000 |    95.98 |
+   | hidden_layers | hidden_count | bf | skip_refresh |   minutes | accuracy |
+   |---------------+--------------+----+--------------+-----------+----------|
+   |            64 |           64 |  0 | N            | 29.583333 |    96.88 |
+   |            40 |           40 |  0 | N            | 33.283333 |    96.76 |
+   |            40 |           40 |  1 | Y            | 45.083333 |    96.69 |
+   |            40 |           40 |  1 | N            | 50.200000 |    96.59 |
+   |           128 |          128 |  0 | N            | 52.816667 |    96.54 |
+   |            64 |           64 |  1 | Y            | 43.850000 |    96.54 |
+   |           128 |          128 |  0 | Y            | 22.333333 |    96.36 |
+   |            64 |           64 |  0 | Y            | 16.300000 |    96.13 |
+   |         32 16 |           48 |  0 | N            | 44.000000 |    95.98 |
+   |   64 48 32 16 |          160 |  0 | N            | 59.850000 |    95.98 |
+   |            40 |           40 |  0 | Y            | 12.250000 |    95.89 |
 
    #+begin_src sqlite :db /tmp/bad_frame.db :var orgtable=bad_frame :colnames yes
-   drop table if exists tbf;
-   create table tbf (
-     hidden_layers text, 
-     hidden_count integer
-     bad_frame integer,
-     skip_refresh text,
-     minutes real,
-     accuracy real);
-   .mode csv tbf
-   .import $orgtable tbf
-   select 
-     hidden_layers || ' ' || bad_frame as attributes, 
-     (accuracy - 94) / 6 as "normalized accuracy", 
-     minutes / 60 as minutes
-   from tbf order by accuracy desc;
+     drop table if exists tbf;
+     create table tbf (
+       hidden_layers text, 
+       hidden_count integer,
+       bf integer,
+       skip_refresh text,
+       minutes real,
+       accuracy real);
+     .mode csv tbf
+     .import $orgtable tbf
+     -- select 
+     --   hidden_layers || ' ' || bf as attributes, 
+     --   (accuracy - 94) / 6 as "normalized accuracy", 
+     --   minutes / 60 as minutes
+     -- from tbf order by accuracy desc;
+     select hidden_count, accuracy, minutes * 60 as seconds
+     from tbf 
+     where hidden_count in (40, 64)
+       and bf = 0 
+       and skip_refresh = 'N'
+     order by accuracy desc, seconds
    #+end_src
 
    #+plot: type:2d ind:1 with:histogram
@@ -163,17 +175,10 @@
    #+plot: set:"style fill pattern 4" set:"xtics rotate"
    #+plot: set:"y2range [0:60]" set:"y2tics auto"
    #+RESULTS:
-   | attributes | normalized accuracy |           minutes |
-   |------------+---------------------+-------------------|
-   | 64 0       |   0.479999999999999 |        0.49305555 |
-   | 40 0       |   0.460000000000001 | 0.554722216666667 |
-   | 40 1       |   0.448333333333333 | 0.751388883333333 |
-   | 40 1       |   0.431666666666667 | 0.836666666666667 |
-   | 128 0      |   0.423333333333334 | 0.880277783333333 |
-   | 64 1       |   0.423333333333334 | 0.730833333333333 |
-   | 128 0      |   0.393333333333333 | 0.372222216666667 |
-   | 64 0       |   0.354999999999999 | 0.271666666666667 |
-   | 40 0       |               0.315 | 0.204166666666667 |
+   | hidden_count | accuracy |    seconds |
+   |--------------+----------+------------|
+   |           40 |    96.76 | 1996.99998 |
+   |           64 |    96.88 | 1774.99998 |
 
 ** To Do
 *** DONE (network-error environment)  
@@ -186,13 +191,85 @@
 ***** There should be a function for adding an error
 ***** Reporting function plotting loop needs to be modified for dlist
 **** plotting should be an option in the train function
-*** Play with sinusoid initial weight generation
-*** Consider using mcclim again, for plotting and other things
-*** Train from PNGs and training directory structure
-*** Try other data sets
+*** DONE Play with sinusoid initial weight generation
+    Multiple approaches didn't work as well as random initial weights.
+*** Analyze impact of number of hidden cells on results
+    See evaluate-topologies
+
+
+    #+name: hta
+    | hidden | fitness | seconds | presentations | network_error |
+    |--------+---------+---------+---------------+---------------|
+    |     72 |   97.08 |    1562 |        179011 |     0.0497525 |
+    |     68 |   97.02 |    1525 |        182301 |   0.048873354 |
+    |     76 |   96.94 |    2067 |        202566 |   0.045480218 |
+    |     48 |   96.83 |    1636 |        231256 |    0.04280906 |
+    |     60 |   96.81 |    1622 |        197367 |   0.045777403 |
+    |     40 |   96.76 |    1455 |        241959 |   0.044418395 |
+    |     64 |   96.75 |    1701 |        198033 |    0.04700385 |
+    |     52 |   96.73 |    1897 |        279620 |    0.04743318 |
+    |     80 |   96.55 |    2028 |        186672 |   0.043811984 |
+    |     56 |   96.53 |    1598 |        206863 |     0.0467945 |
+    |     44 |   96.43 |    1412 |        237813 |    0.04740469 |
+
+   #+begin_src sqlite :db /tmp/hta.db :var orgtable=hta :colnames yes
+     drop table if exists hta;
+     create table hta (
+       hidden integer, 
+       fitness real,
+       seconds integer,
+       presentations integer,
+       network_error real
+     );
+     .mode csv hta
+     .import $orgtable hta
+     select 'x-' || hidden as "hidden units", 
+       round((fitness - (select min(fitness) from hta)) / 
+           (select max(fitness) - min(fitness) from hta), 2) as "relative fitness", 
+       round((seconds / 60.0 - 20) / 15, 2) as "relative time"
+     from hta
+     order by "relative time", "relative fitness" desc
+   #+end_src
+
+   #+plot: type:2d ind:1 with:histogram
+   #+plot: set:"ylabel 'Fitness'"
+   #+plot: set:"style fill solid 2"
+   #+RESULTS:
+   | hidden units | relative fitness | relative time |
+   |--------------+------------------+---------------|
+   | x-44         |              0.0 |          0.24 |
+   | x-40         |             0.51 |          0.28 |
+   | x-68         |             0.91 |          0.36 |
+   | x-72         |              1.0 |           0.4 |
+   | x-56         |             0.15 |          0.44 |
+   | x-60         |             0.58 |          0.47 |
+   | x-48         |             0.62 |          0.48 |
+   | x-64         |             0.49 |          0.56 |
+   | x-52         |             0.46 |          0.77 |
+   | x-80         |             0.18 |          0.92 |
+   | x-76         |             0.78 |          0.96 |
+
+*** Analyze convergence variance with random initial weights
+
+*** Consider using McClim again
+    * Plotting training error
+    * Plotting connection weights
+      * Linear
+      * Color-coded weights in network diagram
+      * Individual neuron diagram
+*** Save and load environment
+**** Network and network settings, including weights
+**** Environment and environment settings, with and without training and test sets
+*** Save training set and test set to PNGs in training directory structure
+*** Train from PNGs in training directory structure
 *** Incorporate convolutions
+*** Try other data sets
 *** Revisit architecture
 **** ID vs net or environment objects
 **** What goes in net vs environment
-
-
+*** Show failing images from test set
+*** Add code to fudge existing training data
+**** Change intensity/color noise
+**** Move pixels around
+**** Resize
+**** Change angle

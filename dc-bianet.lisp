@@ -102,13 +102,8 @@
              global-fraction
              layer-fraction
              neuron-fraction)
-    (declare (ignore rstate global-index global-fraction layer-fraction)
-             (single-float neuron-fraction))
-    (let* ((range (- max min))
-           (2pi (* 2 (coerce pi 'single-float)))
-           (x (* neuron-fraction 2pi))
-           (sinx (sin x)))
-      (+ (* (/ (+ sinx 1) 2) range) min))))
+    (declare (ignore rstate global-fraction layer-fraction neuron-fraction))
+    (+ (* (/ (+ (sin (coerce global-index 'single-float)) 1) 2) (- max min)) min)))
 
 (defun display-float (n)
   (read-from-string (format nil "~,4f" n)))
@@ -274,7 +269,8 @@
                          :initform 1000)
    (plot-errors :accessor plot-errors
                 :initarg :plot-errors
-                :initform t)))
+                :initform t)
+   (fitness :accessor fitness :type list :initform nil)))
                 
 
 (defmethod add-training-error ((environment t-environment)
@@ -816,7 +812,8 @@
                       elapsed-seconds
                       presentation
                       network-error)
-  (when (plot-errors environment)
+  (when (and (plot-errors environment)
+             (> (len (training-error environment)) 1))
     (plot-training-error environment))
   (default-report-function environment iteration count 
                            presentation last-presentation 
@@ -1391,6 +1388,7 @@
                                           (test-set environment)))
          (elapsed-seconds (- (get-universal-time) start-time)))
     (add-training-error environment elapsed-seconds presentation network-error)
+    (setf (fitness environment) fitness)
     (plot-training-error environment)
     (with-open-file (log-stream (log-file (net environment))
                                 :direction :output
@@ -1404,6 +1402,13 @@
               (getf fitness :total)))
     (set-training-in-progress nil)
     (collect-weights-into-file (net environment))))
+
+(defun wait-for-training-completion (id)
+  "Waits for training to complete, returns (list fitness% elapsed-seconds presentation network-error)"
+  (let ((environment (getf *environments* id)))
+    (loop while (get-training-in-progress) do (sleep 1)
+       finally (return (cons (getf (fitness environment) :percent)
+                             (value (tail (training-error environment))))))))
   
 (defun shuffle (seq)
   "Return a sequence with the same elements as the given sequence S, but in random order (shuffled)."
@@ -1575,3 +1580,71 @@
      while (< (expt 2 power) output-count)
      finally (return (list input-count (expt 2 (1+ power)) output-count))))
 
+
+(defun evaluate-topologies (&key
+                              (id :zero-or-one)
+                              (inputs 784)
+                              (outputs 2)
+                              (hidden-start 16)
+                              (hidden-stop 32)
+                              (hidden-step 16)
+                              (training-file "mnist-0-1-train.csv")
+                              (test-file "mnist-0-1-test.csv")
+                              (init-weights-function (make-random-weight-fn))
+                              (report-frequency 1))
+  (loop with row-format = "|~{ ~a | ~}"
+     for hidden from hidden-start to hidden-stop by hidden-step
+     for environment = (create-environment
+                        id (list inputs hidden outputs)
+                        :training-file training-file
+                        :test-file test-file
+                        :weight-reset-function init-weights-function)
+     for training = (progn (train id :report-frequency report-frequency)
+                           (format t "~a~%" (log-file *net*)))
+     for (fitness elapsed presentations network-error) =
+       (wait-for-training-completion id)
+     do (format t "fit=~,2f%; hidden=~d; secs=~d; presented=~d; error=~d~%"
+                fitness hidden elapsed presentations network-error)
+     collect (format nil row-format
+                     (list fitness hidden elapsed presentations network-error))
+     into lines
+     finally (push
+              (format nil row-format
+                      '("fitness" "hidden" "elapsed" "presentations"
+                        "network-error"))
+              lines)
+       (return (format nil "~{~a~%~}" lines))))
+
+(defun evaluate-convergence-variance (&key
+                                        (id :zero-or-none)
+                                        (inputs 784)
+                                        (outputs 2)
+                                        (hidden-units 16)
+                                        (iterations 5)
+                                        (training-file "mnist-0-1-train.csv")
+                                        (test-file "mnist-0-1-test.csv")
+                                        (init-weights-function (make-random-weight-fn))
+                                        (report-frequency 1))
+  (loop with row-format = "|~{ ~a | ~}"
+     for iteration from 1 to iterations
+     for environment = (create-environment
+                        id (list inputs hidden-units outputs)
+                        :training-file training-file
+                        :test-file test-file
+                        :weight-reset-function init-weights-function)
+     for training = (progn (train id :report-frequency report-frequency)
+                           (format t "~a~%" (log-file *net*)))
+     for (fitness elapsed presentations network-error) =
+       (wait-for-training-completion id)
+     do (format t "fit=~,2f%; hidden=~d; secs=~d; presented=~d; error=~d~%"
+                fitness hidden-units elapsed presentations network-error)
+     collect (format nil row-format
+                     (list fitness hidden-units elapsed presentations network-error))
+     into lines
+     finally (push
+              (format nil row-format
+                      '("fitness" "hidden" "elapsed" "presentations"
+                        "network-error"))
+              lines)
+       (return (format nil "~{~a~%~}" lines))))
+                                        
