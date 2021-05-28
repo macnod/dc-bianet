@@ -1,5 +1,3 @@
-#+title dc-bianet
-
 * Overview
 dc-bianet is a simple back-propagation neural network framework.
 Neurons are implemented as objects with arbitrary connections to other
