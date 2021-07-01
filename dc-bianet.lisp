@@ -269,7 +269,7 @@
                          :initform 1000)
    (plot-errors :accessor plot-errors
                 :initarg :plot-errors
-                :initform t)
+                :initform nil)
    (fitness :accessor fitness :type list :initform nil)))
                 
 
@@ -1346,7 +1346,7 @@
                    (thread-count *default-thread-count*)
                    (report-function #'plotting-report-function)
                    (report-frequency 10)
-                   (plot-errors t)
+                   plot-errors
                    weights-file
                    skip-refresh)
   (let ((environment (getf *environments* id)))
@@ -1389,7 +1389,8 @@
          (elapsed-seconds (- (get-universal-time) start-time)))
     (add-training-error environment elapsed-seconds presentation network-error)
     (setf (fitness environment) fitness)
-    (plot-training-error environment)
+    (when (plot-errors environment)
+      (plot-training-error environment))
     (with-open-file (log-stream (log-file (net environment))
                                 :direction :output
                                 :if-exists :append
