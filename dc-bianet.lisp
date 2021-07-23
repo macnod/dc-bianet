@@ -30,6 +30,8 @@
 (defparameter *training-set* nil)
 (defparameter *test-set* nil)
 
+(swank:create-server :dont-close t)
+
 (defun thread-work ()
   (loop for (k v) = (receive-message *job-queue*)
      do (case k

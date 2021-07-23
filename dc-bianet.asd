@@ -11,7 +11,8 @@
                #:zpng 
                #:png-read
                #:vgplot
-               #:cl-ppcre)
+               #:cl-ppcre
+	       #:swank)
   :serial t
   :components ((:file "dc-bianet-package")
                (:file "dc-bianet")))
