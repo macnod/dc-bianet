@@ -12,6 +12,7 @@
                #:png-read
                #:vgplot
                #:cl-ppcre
+	       #:dc-utilities
 	       #:swank)
   :serial t
   :components ((:file "dc-bianet-package")

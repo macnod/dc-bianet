@@ -30,7 +30,20 @@
 (defparameter *training-set* nil)
 (defparameter *test-set* nil)
 
-(swank:create-server :dont-close t)
+(defun start-swank-server ()
+  (loop for potential-port = 4005 then (1+ potential-port) 
+     for tries from 1 to 5
+     for port = (handler-case 
+		    (swank:create-server :port potential-port :dont-close t)
+		  (sb-bsd-sockets:socket-error () nil))
+     until port
+     finally (format t "~%Started swank server on port ~d~%" port)
+       (return port)))
+
+(start-swank-server)
+
+(defun stop-swank-servers ()
+  (loop for port from 4005 to 4010 do (swank:stop-server port)))
 
 (defun thread-work ()
   (loop for (k v) = (receive-message *job-queue*)
@@ -1557,18 +1570,18 @@
                          (map 'vector 'identity frames)
                          frames))))
 
-(defun pngs->frames (png-tree-path &key as-vector)
-  (loop with labels = (relative-subdirectories-of png-tree-path)
-     with label->index = (list->key-index labels)
-     with label->expected-outputs = (label-outputs-hash label->index)
-     for label in labels
-     for label-folder = (join-paths png-tree-path label)
-     for expected-outputs = (gethash label label->expected-outputs)
-     appending (pngs->training-set-for-label label-folder expected-outputs)
-     into frames
-     finally (return (if as-vector
-                         (map 'vector 'identity frames)
-                         frames))))
+;; (defun pngs->frames (png-tree-path &key as-vector)
+;;   (loop with labels = (relative-subdirectories-of png-tree-path)
+;;      with label->index = (list->key-index labels)
+;;      with label->expected-outputs = (label-outputs-hash label->index)
+;;      for label in labels
+;;      for label-folder = (join-paths png-tree-path label)
+;;      for expected-outputs = (gethash label label->expected-outputs)
+;;      appending (pngs->training-set-for-label label-folder expected-outputs)
+;;      into frames
+;;      finally (return (if as-vector
+;;                          (map 'vector 'identity frames)
+;;                          frames))))
 
 (defun any-png-in (png-tree-path)
   (let* ((output-labels (relative-subdirectories-of png-tree-path))
