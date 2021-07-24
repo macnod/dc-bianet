@@ -21,6 +21,11 @@
 (defparameter *training-in-progress-mutex* (make-mutex :name "training-in-progress"))
 (defparameter *continue-training* nil)
 
+(defparameter *home-folder* (join-paths (namestring (user-homedir-pathname))
+                                        "common-lisp" "dc-bianet"))
+
+(defparameter *log-folder* "/tmp/bianet-logs")
+
 (defparameter *environments* nil) ;; p-list of id -> environment
 
 ;; Current environment
@@ -44,6 +49,9 @@
 
 (defun stop-swank-servers ()
   (loop for port from 4005 to 4010 do (swank:stop-server port)))
+
+;; Database
+(defparameter *db* (funcall #'ds (cons :map (slurp-n-thaw (join-paths *home-folder* "db-conf.lisp")))))
 
 (defun thread-work ()
   (loop for (k v) = (receive-message *job-queue*)
@@ -307,10 +315,10 @@
      finally (funcall #'plot elapsed-seconds network-error-list)))
 
 (defmethod default-log-file-name ((net t-net))
-  (format nil "~atmp/~(~a~)-~{~a~^-~}.log"
-          (user-homedir-pathname)
-          (id net)
-          (simple-topology net)))
+  (join-paths *log-folder*
+              (format nil "~(~a~)-~{~a~^-~}.log"
+                      (id net)
+                      (simple-topology net))))
 
 (defmethod default-weights-file-name ((net t-net))
   (format nil "~atmp/~(~a~)-~{~a~^-~}-weights.dat"
@@ -922,16 +930,6 @@
          do (incf (gethash label label-counts 0))))
     label-counts))
 
-(defmethod index-of-max ((list list))
- (loop with max-index = 0 and max-value = (elt list 0)
-       for value in list
-       for index = 0 then (1+ index)
-       when (> value max-value)
-       do 
-         (setf max-index index)
-         (setf max-value value)
-       finally (return max-index)))
-
 (defgeneric evaluate-inference-1hs (net training-frames)
   (:method ((net t-net) (training-frames list))
     (loop with own-threads = (not *thread-pool*)
@@ -1011,7 +1009,8 @@
      finally (return layer)))
 
 (defun create-net (topology &key (id (bianet-id)) log-file)
-  (loop with log = (or log-file (format nil "/tmp/~(~a~).log" id))
+  (loop with log = (or log-file (join-paths *log-folder*
+                                            (format nil "~(~a~).log" id)))
      with net = (make-instance 't-net :id id :log-file log)
      for layer-spec in topology
      for count = (or (getf layer-spec :neurons)
@@ -1312,6 +1311,19 @@
     (when make-current (set-current-environment id))
     environment))
 
+;; (defun create-environment-from-pngs
+;;     (id
+;;      &key
+;;        (png-folder (error "png-folder parameter is required."))
+;;        hidden-layers
+;;   (let* ((training-file-name (join-paths png-folder
+;;                                          (format nil "~(~a~)-train.lisp" id)))
+;;          (test-file-name (join-paths png-folder
+;;                                      (format nil "~(~a~)-test.lisp" id)))
+;;          (output-labels (relative-subdirectories-of png-folder))
+;;          (input-count (length (read-png (any-png-in png-folder)))))
+         
+
 (defun update-training-set (id)
   (let* ((env (environment-by-id id))
          (file (training-file env))
@@ -1570,18 +1582,18 @@
                          (map 'vector 'identity frames)
                          frames))))
 
-;; (defun pngs->frames (png-tree-path &key as-vector)
-;;   (loop with labels = (relative-subdirectories-of png-tree-path)
-;;      with label->index = (list->key-index labels)
-;;      with label->expected-outputs = (label-outputs-hash label->index)
-;;      for label in labels
-;;      for label-folder = (join-paths png-tree-path label)
-;;      for expected-outputs = (gethash label label->expected-outputs)
-;;      appending (pngs->training-set-for-label label-folder expected-outputs)
-;;      into frames
-;;      finally (return (if as-vector
-;;                          (map 'vector 'identity frames)
-;;                          frames))))
+(defun pngs->frames (png-tree-path &key as-vector)
+  (loop with labels = (relative-subdirectories-of png-tree-path)
+     with label->index = (list->key-index labels)
+     with label->expected-outputs = (label-outputs-hash label->index)
+     for label in labels
+     for label-folder = (join-paths png-tree-path label)
+     for expected-outputs = (gethash label label->expected-outputs)
+     appending (pngs->frames-for-label label-folder expected-outputs)
+     into frames
+     finally (return (if as-vector
+                         (map 'vector 'identity frames)
+                         frames))))
 
 (defun any-png-in (png-tree-path)
   (let* ((output-labels (relative-subdirectories-of png-tree-path))

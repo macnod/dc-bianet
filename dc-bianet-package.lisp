@@ -7,6 +7,9 @@
         :dc-dlist
         :sb-concurrency
         :sb-thread
-        :vgplot
         :zpng
-        ))
+        :vgplot
+        :dc-utilities
+        :dc-db)
+  (:shadow :range))
+
