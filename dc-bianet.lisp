@@ -25,6 +25,7 @@
                                         "common-lisp" "dc-bianet"))
 
 (defparameter *log-folder* "/tmp/bianet-logs")
+(defparameter *db-log-file* "db.log")
 
 (defparameter *environments* nil) ;; p-list of id -> environment
 
@@ -34,6 +35,16 @@
 (defparameter *network-error* 0.0)
 (defparameter *training-set* nil)
 (defparameter *test-set* nil)
+
+(defun db-log (message)
+  (with-open-file (out (join-paths *log-folder* *db-log-file*)
+                       :direction :output
+                       :if-exists :append
+                       :if-does-not-exist :create)
+    (write-line message out)))
+
+;; Database
+(defparameter *db* (funcall #'ds (cons :map (slurp-n-thaw (join-paths *home-folder* "db-conf.lisp")))))
 
 (defun start-swank-server ()
   (loop for potential-port = 4005 then (1+ potential-port) 
@@ -49,9 +60,6 @@
 
 (defun stop-swank-servers ()
   (loop for port from 4005 to 4010 do (swank:stop-server port)))
-
-;; Database
-(defparameter *db* (funcall #'ds (cons :map (slurp-n-thaw (join-paths *home-folder* "db-conf.lisp")))))
 
 (defun thread-work ()
   (loop for (k v) = (receive-message *job-queue*)
