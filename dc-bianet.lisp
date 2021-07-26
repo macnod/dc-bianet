@@ -41,10 +41,12 @@
                        :direction :output
                        :if-exists :append
                        :if-does-not-exist :create)
-    (write-line message out)))
+    (write-line (timestamp :string message) out)))
 
 ;; Database
 (defparameter *db* (funcall #'ds (cons :map (slurp-n-thaw (join-paths *home-folder* "db-conf.lisp")))))
+(ds-set *db* :log-function #'db-log)
+(ensure-directories-exist *log-folder*)
 
 (defun start-swank-server ()
   (loop for potential-port = 4005 then (1+ potential-port) 
