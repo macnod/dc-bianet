@@ -18,11 +18,12 @@
 (defparameter *thread-pool* nil) ;; A simple list
 (defparameter *gates* nil)
 (defparameter *main-training-thread* nil)
-(defparameter *training-in-progress-mutex* (make-mutex :name "training-in-progress"))
+(defparameter *training-in-progress-mutex* 
+  (make-mutex :name "training-in-progress"))
 (defparameter *continue-training* nil)
 
-(defparameter *home-folder* (join-paths (namestring (user-homedir-pathname))
-                                        "common-lisp" "dc-bianet"))
+(defparameter *home-folder* 
+  (join-paths (namestring (user-homedir-pathname)) "common-lisp" "dc-bianet"))
 
 (defparameter *log-folder* "/tmp/bianet-logs")
 (defparameter *db-log-file* "db.log")
@@ -44,7 +45,9 @@
     (write-line (timestamp :string message) out)))
 
 ;; Database
-(defparameter *db* (funcall #'ds (cons :map (slurp-n-thaw (join-paths *home-folder* "db-conf.lisp")))))
+(defparameter *db* 
+  (funcall #'ds (cons :map (slurp-n-thaw 
+			    (join-paths *home-folder* "db-conf.lisp")))))
 (ds-set *db* :log-function #'db-log)
 (ensure-directories-exist *log-folder*)
 
@@ -136,7 +139,8 @@
              layer-fraction
              neuron-fraction)
     (declare (ignore rstate global-fraction layer-fraction neuron-fraction))
-    (+ (* (/ (+ (sin (coerce global-index 'single-float)) 1) 2) (- max min)) min)))
+    (+ (* (/ (+ (sin (coerce global-index 'single-float)) 1) 2) 
+	  (- max min)) min)))
 
 (defun display-float (n)
   (read-from-string (format nil "~,4f" n)))
@@ -154,8 +158,10 @@
            (optimize (speed 3) (safety 0)))
   (cond ((> x (the single-float 16.64)) (the single-float 1.0))
         ((< x (the single-float -88.7)) (the single-float 0.0))
-        ((< (the single-float (abs x)) (the single-float 1e-8)) (the single-float 0.5))
-        (t (/ (the single-float 1.0) (the single-float (1+ (the single-float (exp (- x)))))))))
+        ((< (the single-float (abs x)) (the single-float 1e-8))
+	 (the single-float 0.5))
+        (t (/ (the single-float 1.0) 
+	      (the single-float (1+ (the single-float (exp (- x)))))))))
 
 (defun logistic-derivative (x)
   (declare (single-float x)
@@ -254,7 +260,8 @@
 
 (defclass t-net ()
   ((id :reader id :initarg :id :type keyword :initform (bianet-id))
-   (layer-dlist :accessor layer-dlist :type dlist :initform (make-instance 'dlist))
+   (layer-dlist :accessor layer-dlist :type dlist 
+		:initform (make-instance 'dlist))
    (log-file :accessor log-file :initarg :log-file :initform nil)
    (weights-file :accessor weights-file :initarg :weights-file :initform nil)
    (rstate :reader rstate :initform (make-random-state))
@@ -414,9 +421,11 @@
                     for cx-node = (head (cx-dlist neuron)) then (next cx-node)
                     while cx-node
                     for cx = (value cx-node)
-                    summing (the single-float 
-                                 (* (the single-float (weight cx))
-                                    (the single-float (err-derivative (target cx)))))))))
+                    summing 
+		      (the single-float 
+			   (* (the single-float (weight cx))
+			      (the single-float 
+				   (err-derivative (target cx)))))))))
     (with-mutex ((err-mtx neuron)) (setf (err neuron) err))
     (with-mutex ((err-der-mtx neuron))
       (setf (err-derivative neuron)
@@ -465,7 +474,8 @@
      while neuron-node
      for neuron = (value neuron-node)
      for expected-output-value in expected-output-values
-     do (setf (expected-output neuron) (the single-float expected-output-value))))
+     do (setf (expected-output neuron) 
+	      (the single-float expected-output-value))))
 
 (defgeneric collect-neurons (thing)
   (:method ((net t-net))
@@ -574,15 +584,16 @@
                  while cx-node
                  for cx = (value cx-node)
                  for neuron-index = 0 then (1+ neuron-index)
-                 for weight = (funcall (initial-weight-function net)
-                                       :rstate (rstate net)
-                                       :global-index global-index
-                                       :global-fraction (/ (float global-index)
-                                                           (float global-count))
-                                       :layer-fraction (/ (float layer-index)
-                                                          (float layer-count))
-                                       :neuron-fraction (/ (float neuron-index)
-                                                           (float neuron-count)))
+                 for weight = (funcall 
+			       (initial-weight-function net)
+			       :rstate (rstate net)
+			       :global-index global-index
+			       :global-fraction (/ (float global-index)
+						   (float global-count))
+			       :layer-fraction (/ (float layer-index)
+						  (float layer-count))
+			       :neuron-fraction (/ (float neuron-index)
+						   (float neuron-count)))
                  do (with-mutex ((weight-mtx cx))
                       (setf (weight cx) weight)
                       (setf (delta cx) 0.0))
@@ -634,8 +645,12 @@
     (loop for neuron-node = (head layer) then (next neuron-node)
        while neuron-node
        for neuron = (value neuron-node)
+       for fmtstr = (concatenate 
+		     'string 
+		     "  Neuron ~a ~(~a~) i=~,4f; o=~,4f;"
+		     " eo=~,4f; e=~,4f; ed=~,4f~%")
        do
-         (format t "  Neuron ~a ~(~a~) i=~,4f; o=~,4f; eo=~,4f; e=~,4f; ed=~,4f~%" 
+         (format t fmtstr 
                  (name neuron) 
                  (transfer-key neuron)
                  (input neuron)
@@ -896,8 +911,9 @@
     set))
 
 ;; (defun type-1-file->training-set-metadata (training-file)
-;;   "Accepts the path to a type-1 training file and retrieves training set metadata
-;;    in the form of a p-list that includes entries for 
+;;   "Accepts the path to a type-1 training file and retrieves 
+;;    training set metadata in the form of a p-list that 
+;;    includes entries for 
 
 (defun label-outputs-hash (label-index)
   (loop with label-outputs = (make-hash-table :test 'equal)
@@ -1004,7 +1020,9 @@
   (:method ((net t-net) (frames list) (target-error float))
     (faster-network-error net (map 'vector 'identity frames) target-error)))
 
-(defmethod refresh-frame-errors ((net t-net) (frames vector) (frame-errors vector))
+(defmethod refresh-frame-errors ((net t-net) 
+				 (frames vector) 
+				 (frame-errors vector))
   (loop for (inputs expected-outputs) across frames
      for outputs = (infer-frame net inputs)
      for index = 0 then (1+ index)
@@ -1074,7 +1092,8 @@
                                             :learning-rate learning-rate
                                             :momentum momentum
                                             :skip-modulus cx-params)))
-                               (otherwise (error "Unknown cx-mode ~(~a~)." cx-mode)))
+                               (otherwise 
+				(error "Unknown cx-mode ~(~a~)." cx-mode)))
      with net = (make-instance 't-net :id id
                                :initial-weight-function weight-reset-function
                                :connect-function connect-function)
@@ -1241,7 +1260,11 @@
      collect (list (list x y) (list false true))))
 
 (defun shell-execute (program &optional parameters (input-pipe-data ""))
-  "Run PROGRAM and return the output of the program as a string.  You can pass an atom or a list for PARAMETERS (the command-line options for the program). You can also pipe data to the program by passing the INPUT-PIPE-DATA parameter with a string containing the data you want to pipe.  The INPUT-PIPE-DATA parameter defaults to the empty string."
+  "Run PROGRAM and return the output of the program as a string.  You
+can pass an atom or a list for PARAMETERS (the command-line options
+for the program). You can also pipe data to the program by passing the
+INPUT-PIPE-DATA parameter with a string containing the data you want
+to pipe.  The INPUT-PIPE-DATA parameter defaults to the empty string."
   (let ((parameters (cond ((null parameters) nil)
                           ((atom parameters) (list parameters))
                           (t parameters))))
@@ -1265,13 +1288,15 @@
      for c across csv-line
      if (char= c #\,) collect (reverse word) into words and do (setf word nil)
      else do (push c word)
-     finally (return (loop for chars in (reverse (cons (reverse word) (reverse words)))
+     finally (return (loop for chars in (reverse (cons (reverse word) 
+						       (reverse words)))
                         for first = t then nil
                         for string = (map 'string 'identity chars)
                         collect (if first string (read-from-string string))))))
 
 (defun join-paths (&rest path-parts)
-  "Joins elements of PATH-PARTS into a file path, inserting slashes where necessary."
+  "Joins elements of PATH-PARTS into a file path, inserting slashes
+where necessary."
   (format nil "~a~{~a~^/~}"
           (if (scan "^/" (car path-parts)) "/" "")
           (loop for part in path-parts
@@ -1323,16 +1348,17 @@
                :cx-params cx-params
                :learning-rate learning-rate
                :momentum momentum))
-         (environment (make-instance 't-environment
-                                     :id id
-                                     :net net
-                                     :training-file training-file-name
-                                     :test-file test-file-name
-                                     :training-set training-set
-                                     :test-set test-set
-                                     :label->index label->index
-                                     :label->expected-outputs label->expected-outputs
-                                     :index->label index->label)))
+         (environment (make-instance 
+		       't-environment
+		       :id id
+		       :net net
+		       :training-file training-file-name
+		       :test-file test-file-name
+		       :training-set training-set
+		       :test-set test-set
+		       :label->index label->index
+		       :label->expected-outputs label->expected-outputs
+		       :index->label index->label)))
     (setf (getf *environments* id) environment)
     (when make-current (set-current-environment id))
     environment))
@@ -1359,7 +1385,8 @@
 ;;          (label-index (label-counts->label-indexes label-counts))
 ;; 	 (index-label (vectorize-sorted-hash-keys label-counts))
 ;; 	 (label-outputs (label-outputs-hash label-index))
-;; 	 (training-set-metadata (type-1-file->training-set-metadata training-file-name)))
+;; 	 (training-set-metadata (type-1-file->training-set-metadata 
+;;                               training-file-name)))
 ;;     (create-db-environment 
     
 	 
@@ -1370,8 +1397,9 @@
 ;;      &key
 ;;        (png-folder (error "png-folder parameter is required."))
 ;;        hidden-layers
-;;   (let* ((training-file-name (join-paths png-folder
-;;                                          (format nil "~(~a~)-train.lisp" id)))
+;;   (let* ((training-file-name (join-paths 
+;;                               png-folder
+;;                               (format nil "~(~a~)-train.lisp" id)))
 ;;          (test-file-name (join-paths png-folder
 ;;                                      (format nil "~(~a~)-test.lisp" id)))
 ;;          (output-labels (relative-subdirectories-of png-folder))
@@ -1486,14 +1514,16 @@
     (collect-weights-into-file (net environment))))
 
 (defun wait-for-training-completion (id)
-  "Waits for training to complete, returns (list fitness% elapsed-seconds presentation network-error)"
+  "Waits for training to complete, returns (list fitness%
+elapsed-seconds presentation network-error)"
   (let ((environment (getf *environments* id)))
     (loop while (get-training-in-progress) do (sleep 1)
        finally (return (cons (getf (fitness environment) :percent)
                              (value (tail (training-error environment))))))))
   
 (defun shuffle (seq)
-  "Return a sequence with the same elements as the given sequence S, but in random order (shuffled)."
+  "Returnx a sequence with the same elements as the given sequence S,
+but in random order (shuffled)."
   (loop
      with l = (length seq) 
      with w = (make-array l :initial-contents seq)
@@ -1697,16 +1727,17 @@
               lines)
        (return (format nil "~{~a~%~}" lines))))
 
-(defun evaluate-convergence-variance (&key
-                                        (id :zero-or-none)
-                                        (inputs 784)
-                                        (outputs 2)
-                                        (hidden-units 16)
-                                        (iterations 5)
-                                        (training-file "mnist-0-1-train.csv")
-                                        (test-file "mnist-0-1-test.csv")
-                                        (init-weights-function (make-random-weight-fn))
-                                        (report-frequency 1))
+(defun evaluate-convergence-variance 
+    (&key
+       (id :zero-or-none)
+       (inputs 784)
+       (outputs 2)
+       (hidden-units 16)
+       (iterations 5)
+       (training-file "mnist-0-1-train.csv")
+       (test-file "mnist-0-1-test.csv")
+       (init-weights-function (make-random-weight-fn))
+       (report-frequency 1))
   (loop with row-format = "|~{ ~a | ~}"
      for iteration from 1 to iterations
      for environment = (create-environment
@@ -1721,7 +1752,11 @@
      do (format t "fit=~,2f%; hidden=~d; secs=~d; presented=~d; error=~d~%"
                 fitness hidden-units elapsed presentations network-error)
      collect (format nil row-format
-                     (list fitness hidden-units elapsed presentations network-error))
+                     (list fitness 
+			   hidden-units 
+			   elapsed 
+			   presentations 
+			   network-error))
      into lines
      finally (push
               (format nil row-format
@@ -1729,4 +1764,3 @@
                         "network-error"))
               lines)
        (return (format nil "~{~a~%~}" lines))))
-                                        
