@@ -894,7 +894,11 @@
          for expected-outputs = (gethash label label->expected-outputs)
          do (setf (aref set index) (list inputs expected-outputs))))
     set))
-         
+
+;; (defun type-1-file->training-set-metadata (training-file)
+;;   "Accepts the path to a type-1 training file and retrieves training set metadata
+;;    in the form of a p-list that includes entries for 
+
 (defun label-outputs-hash (label-index)
   (loop with label-outputs = (make-hash-table :test 'equal)
      for label being the hash-keys in label-index using (hash-value index)
@@ -932,6 +936,11 @@
      do (setf (gethash index index-labels) label)))
 
 (defun type-1-file->label-counts (filename)
+  "Reads a training CSV file where each line contains a label (string) 
+   and a set of input values (floats). Collects the labels from each line
+   into a hash table where the each key corresponds to a labels and the
+   the associated value corresponds to the number of lines in the file
+   with that label."
   (let ((label-counts (make-hash-table :test 'equal)))
     (with-open-file (file filename)
       (loop for line = (read-line file nil)
@@ -939,6 +948,13 @@
          for label = (subseq line 0 (search "," line))
          do (incf (gethash label label-counts 0))))
     label-counts))
+
+(defun vectorize-sorted-hash-keys (hash)
+  "Accepts a hash with string keys and returns a vector with
+   the keys, sorted alphabetically"
+  (loop for key being the hash-keys in hash
+     collect key into list
+     finally (return (map 'vector 'identity (sort list #'string<)))))
 
 (defgeneric evaluate-inference-1hs (net training-frames)
   (:method ((net t-net) (training-frames list))
@@ -1320,6 +1336,34 @@
     (setf (getf *environments* id) environment)
     (when make-current (set-current-environment id))
     environment))
+
+;; (defun create-environment-from-csvs
+;;     (id
+;;      topology
+;;      &key
+;;        (home-folder (join-paths (namestring (user-homedir-pathname))
+;;                                 "common-lisp" "dc-bianet"))
+;;        (test-file "mnist-0-1-test.csv")
+;;        (training-file "mnist-0-1-train.csv")
+;;        (weight-reset-function (make-random-weight-fn :min -0.5 :max 0.5))
+;;        (make-current t)
+;;        (learning-rate *default-learning-rate*)
+;;        (momentum *default-momentum*))
+;;   (let* ((training-file-name (if (equal (subseq training-file 0 1) "/")
+;; 				 training-file
+;; 				 (join-paths home-folder training-file)))
+;; 	 (test-file-name (if (equal (subseq test-file 0 1) "/")
+;; 			     test-file
+;; 			     (join-paths home-folder test-file)))
+;;          (label-counts (type-1-file->label-counts training-file-name))
+;;          (label-index (label-counts->label-indexes label-counts))
+;; 	 (index-label (vectorize-sorted-hash-keys label-counts))
+;; 	 (label-outputs (label-outputs-hash label-index))
+;; 	 (training-set-metadata (type-1-file->training-set-metadata training-file-name)))
+;;     (create-db-environment 
+    
+	 
+  
 
 ;; (defun create-environment-from-pngs
 ;;     (id
