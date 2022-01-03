@@ -14,7 +14,9 @@
                #:cl-ppcre
                #:dc-utilities
                #:swank
-               #:dc-db)
+               #:dc-db
+							 #:mcclim
+							 #:clim-lisp)
   :serial t
   :components ((:file "dc-bianet-package")
                (:file "dc-bianet")))

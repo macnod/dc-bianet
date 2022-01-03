@@ -1,8 +1,7 @@
 ;;;; dc-bianet-package.lisp
 
 (defpackage :dc-bianet
-  (:use :cl
-        :cl-cpus
+  (:use :cl-cpus
         :cl-ppcre
         :dc-dlist
         :sb-concurrency
@@ -10,6 +9,8 @@
         :zpng
         :vgplot
         :dc-utilities
-        :dc-db)
+        :dc-db
+				:clim
+				:clim-lisp)
   (:shadow :range))
 

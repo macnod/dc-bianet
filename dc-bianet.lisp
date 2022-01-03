@@ -1686,3 +1686,44 @@
               lines)
        (return (format nil "~{~a~%~}" lines))))
                                         
+;;; clim
+
+(define-application-frame bianet ()
+	()
+	(:geometry :width 1200 :height 800)
+	(:menu-bar nil)
+	(:panes
+	 (network :application :display-time t :display-function #'render-neural-network)
+	 (neuron :application :width 300)
+	 (training-error :application)
+	 (input :interactor :width 400))
+	(:layouts (default
+								(vertically ()
+									(4/8 (horizontally ()
+												 (:fill network)
+												 neuron))
+									(3/8 training-error)
+									(1/8 input)))))
+
+(defun render-neural-network (frame pane)
+	(declare (ignore frame))
+	(loop with height = (bounding-rectangle-height (window-viewport pane))
+		 and top-margin = 10
+		 and bottom-margin = 10
+		 and left-margin = 10
+		 with layer-height = (/ (- height top-margin bottom-margin) (len (layer-dlist *net*)))
+		 for layer = (head (layer-dlist *net*)) then (next layer)
+		 for y = top-margin then (+ y layer-height)
+		 while layer
+		 do (loop for neuron = (head (value layer)) then (next neuron)
+					 for x = left-margin then (+ x 3)
+					 while neuron
+					 do (draw-point* pane x y :ink +black+ :line-thickness 2))))
+
+
+(defparameter *bianet-frame* nil)
+
+(defun run ()
+	(setf *bianet-frame* (make-application-frame 'bianet))
+	(make-thread (lambda () (run-frame-top-level *bianet-frame*))
+							 :name "bianet-frame"))
