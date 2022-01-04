@@ -903,17 +903,34 @@
       (loop for line = (read-line file nil)
          for index = 0 then (1+ index)
          while (and line (> (length line) 1))
-         for values = (type-1-csv-line->label-and-inputs line)
+         for values = (type-1-line->label-and-inputs line)
          for label = (car values)
          for inputs = (cdr values)
          for expected-outputs = (gethash label label->expected-outputs)
          do (setf (aref set index) (list inputs expected-outputs))))
     set))
 
-;; (defun type-1-file->training-set-metadata (training-file)
-;;   "Accepts the path to a type-1 training file and retrieves 
-;;    training set metadata in the form of a p-list that 
-;;    includes entries for 
+(defun type-1-file->training-set-metadata (training-file)
+  "Accepts the path to a type-1 training file and retrieves 
+   training set metadata in the form of a p-list that 
+   includes the following entries:
+      :label-counts    Output labels and the number of sample vectors
+                       for each label, in the form of a hash table.
+      :input-count     The number of inputs in a sample vector.
+      :sample-count    The total number of sample vectors in the file."
+  (with-open-file (file training-file)
+    (loop with label-counts = (make-hash-table :test 'equal)
+       for line = (read-line file nil)
+       while (and line (> (length line) 1))
+       for values = (type-1-line->label-and-inputs line)
+       then (type-1-line->label-and-inputs line 1)
+       for input-count = (length (cdr values)) then input-count
+       for sample-count = 1 then (1+ sample-count)
+       for label = (car values)
+       do (incf (gethash label label-counts 0))
+       finally (return (list :label-counts label-counts
+			     :input-count input-count
+			     :sample-count sample-count)))))
 
 (defun label-outputs-hash (label-index)
   (loop with label-outputs = (make-hash-table :test 'equal)
@@ -1283,16 +1300,26 @@ to pipe.  The INPUT-PIPE-DATA parameter defaults to the empty string."
         nil
         (read-from-string result))))
 
-(defun type-1-csv-line->label-and-inputs (csv-line)
-  (loop with word = nil
+(defun type-1-line->label-and-inputs (csv-line &optional max)
+  (loop with word = nil and word-count = 0
+     for reached-limit = (if max (= word-count max) nil)
+     until reached-limit
      for c across csv-line
-     if (char= c #\,) collect (reverse word) into words and do (setf word nil)
+     if (char= c #\,) collect (reverse word) into words 
+     and do 
+       (setf word nil)
+       (incf word-count)
      else do (push c word)
-     finally (return (loop for chars in (reverse (cons (reverse word) 
-						       (reverse words)))
-                        for first = t then nil
-                        for string = (map 'string 'identity chars)
-                        collect (if first string (read-from-string string))))))
+     finally 
+       (return 
+	 (loop with char-words = 
+	      (if reached-limit
+		  words
+		  (reverse (cons (reverse word) (reverse words))))
+	    for chars in char-words
+	    for first = t then nil
+	    for string = (map 'string 'identity chars)
+	    collect (if first string (read-from-string string))))))
 
 (defun join-paths (&rest path-parts)
   "Joins elements of PATH-PARTS into a file path, inserting slashes
@@ -1388,8 +1415,6 @@ where necessary."
 ;; 	 (training-set-metadata (type-1-file->training-set-metadata 
 ;;                               training-file-name)))
 ;;     (create-db-environment 
-    
-	 
   
 
 ;; (defun create-environment-from-pngs
