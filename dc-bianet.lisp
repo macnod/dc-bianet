@@ -1771,8 +1771,9 @@
 	((net :accessor net :initarg :net :initform nil)
 	 (zoom :accessor zoom :initarg :zoom :initform 100)
 	 (radius :accessor radius :initarg :radius :initform 2)
-	 (hi-pass :accessor hi-pass :initarg :hi-pass :initform 0.8)
-	 (lo-pass :accessor lo-pass :initarg :lo-pass :initform 0.2))
+	 (lf-enabled :accessor lf-enabled :initarg :lf-enabled :initform nil)
+	 (lf-hi-pass :accessor lf-hi-pass :initarg :lf-hi-pass :initform 0.8)
+	 (lf-lo-pass :accessor lf-lo-pass :initarg :lf-lo-pass :initform 0.2))
 	(:geometry :width 1200 :height 800)
 	(:menu-bar t)
 	(:panes
@@ -1794,6 +1795,9 @@
 		 and height = (bounding-rectangle-height pane)
 		 with min-weight = (min-weight net)
 		 with weight-span = (- (max-weight net) min-weight)
+		 and lf-enabled = (lf-enabled frame)
+		 and lf-lo-pass = (lf-lo-pass frame)
+		 and lf-hi-pass = (lf-hi-pass frame)
 		 initially (window-clear pane)
 		 for layer-node = (head (layer-dlist net)) then (next layer-node)
 		 while layer-node do
@@ -1811,8 +1815,11 @@
 							 for target-neuron = (target cx)
 							 for target-x = (truncate (* width (x-coor target-neuron) (/ (zoom frame) 100)))
 							 for target-y = (truncate (* height (y-coor target-neuron) (/ (zoom frame) 100)))
-							 for luminosity = (/ (- (weight cx) min-weight) weight-span)
-							 when (or (< luminosity (lo-pass frame)) (> luminosity (hi-pass frame)))
+							 for luminosity = (let ((l (/ (- (weight cx) min-weight) weight-span)))
+																	(cond ((< l 0.0) 0.0) ((> l 1.0) 1.0) (t l)))
+							 when (or (not lf-enabled) 
+												(< luminosity lf-lo-pass) 
+												(> luminosity lf-hi-pass))
 							 do (draw-line* pane x y target-x target-y 
 															:ink (make-gray-color luminosity) :line-thickness 1)))
 		 finally (format pane "~%~%")))
@@ -1828,9 +1835,10 @@
 	(setf (pane-needs-redisplay (get-frame-pane *bianet-frame* 'network)) t))
 
 (define-bianet-command (com-luminosity-filter :menu t :name "Luminosity Filter")
-		((lo-pass 'float) (hi-pass 'float))
-	(setf (lo-pass *bianet-frame*) lo-pass
-				(hi-pass *bianet-frame*) hi-pass)
+		((enabled 'integer) (lo-pass 'float) (hi-pass 'float))
+	(setf (lf-lo-pass *bianet-frame*) lo-pass
+				(lf-hi-pass *bianet-frame*) hi-pass
+				(lf-enabled *bianet-frame*) (not (zerop enabled)))
 	(setf (pane-needs-redisplay (get-frame-pane *bianet-frame* 'network)) t))
 
 (defun run (net)
