@@ -255,6 +255,13 @@
 (defclass t-net ()
   ((id :reader id :initarg :id :type keyword :initform (bianet-id))
    (layer-dlist :accessor layer-dlist :type dlist :initform (make-instance 'dlist))
+	 (neuron-count :accessor neuron-count :initform 0)
+	 (cx-count :accessor cx-count :initform 0)
+	 (width :accessor width :initform nil)
+	 (layer-count :accessor layer-count :initform nil)
+	 (neuron-index :accessor neuron-index :initform (make-hash-table :test 'equal))
+	 (max-weight :accessor max-weight :initform 0)
+	 (min-weight :accessor min-weight :initform 0)
    (log-file :accessor log-file :initarg :log-file :initform nil)
    (weights-file :accessor weights-file :initarg :weights-file :initform nil)
    (rstate :reader rstate :initform (make-random-state))
@@ -1030,10 +1037,39 @@
      for layer = (create-layer count 
                                :add-bias add-bias 
                                :transfer-key transfer-key)
+		 maximizing count into width
      do (push-tail (layer-dlist net) layer)
-     finally 
-       (name-neurons net)
-       (return net)))
+     finally (return (adjustments net))))
+
+(defun adjustments (net)
+	(loop for layer-node = (head (layer-dlist net)) then (next layer-node)
+		 while layer-node
+		 for layer = (value layer-node)
+		 for layer-neuron-count = (len layer)
+		 count layer into layer-count
+		 maximize layer-neuron-count into width
+		 sum layer-neuron-count into neuron-count
+		 sum (cx-count layer) into cx-count
+		 finally 
+			 (name-neurons net)
+			 (set-weight-range net)
+			 (setf (layer-count net) layer-count
+						 (width net) width
+						 (neuron-count net) neuron-count
+						 (cx-count net) cx-count)
+			 (place-neurons net)
+			 (return net)))
+
+(defgeneric cx-count (thing)
+	(:method ((layer dlist))
+		(loop for neuron-node = (head layer) then (next neuron-node)
+			 while neuron-node 
+			 sum (loop with neuron = (value neuron-node)
+							for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+							while cx-node count cx-node)))
+	(:method ((net t-net))
+		(loop for layer-node = (head (layer-dlist net)) then (next layer-node)
+			 while layer-node sum (cx-count (value layer-node)))))
 
 (defun create-standard-net (succinct-topology 
                             &key 
@@ -1074,13 +1110,12 @@
                                :transfer-key transfer-key)
      do (push-tail (layer-dlist net) layer)
      finally
-       (name-neurons net)
        (funcall (connect-function net) net)
        (reset-weights net)
        (create-gates net)
-       (setf (log-file net) (default-log-file-name net))
-       (setf (weights-file net) (default-weights-file-name net))
-       (return net)))
+       (setf (log-file net) (default-log-file-name net)
+						 (weights-file net) (default-weights-file-name net))
+       (return (adjustments net))))
                                
 (defmethod create-gates ((net t-net))
   (setf *gates* 
@@ -1103,11 +1138,32 @@
            while neuron-node
            for neuron = (value neuron-node)
            do (incf global-index)
-             (setf (name neuron) 
-                   (format nil "~a-~a~a" 
-                           layer-index
-                           neuron-index
-                           (if (biased neuron) "b" ""))))))
+						 (let ((name (format nil "~a-~a~a" 
+																 layer-index
+																 neuron-index
+																 (if (biased neuron) "b" ""))))
+							 (setf (name neuron) name)
+							 (setf (gethash name (neuron-index net)) neuron)))))
+
+(defun place-neurons (net)
+	(loop with height = 1.0
+		 and width = 1.0
+		 and top-margin = 0.05
+		 and bottom-margin = 0.05
+		 and left-margin = 0.05
+		 and right-margin = 0.05
+		 with y-spacing = (/ (- height top-margin bottom-margin) (1- (layer-count net)))
+		 for layer-node = (head (layer-dlist net)) then (next layer-node)
+		 while layer-node
+		 for layer = (value layer-node)
+		 for y = top-margin then (+ y y-spacing)
+		 for x-spacing = (/ (- width left-margin right-margin) (len layer))
+		 do (loop for neuron-node = (head layer) then (next neuron-node)
+					 while neuron-node
+					 for neuron = (value neuron-node)
+					 for x = (+ left-margin (/ x-spacing 2)) then (+ x x-spacing)
+					 do (setf (x-coor neuron) x
+										(y-coor neuron) y))))
 
 (defun connect-fully (net &key 
                             (learning-rate *default-learning-rate*)
@@ -1180,8 +1236,8 @@
     ;; Add outgoing connections to next layer
     (add-outgoing-cxs net neuron next-layer
                       :learning-rate learning-rate
-                      :momentum momentum))
-  (name-neurons net))
+                      :momentum momentum)
+		(adjustments net)))
 
 (defun add-incoming-cxs (net neuron source-layer
                          &key
@@ -1418,6 +1474,26 @@
         *test-set* (test-set *environment*))
   *environment*)
 
+(defun set-weight-range (net)
+	(loop with max-weight = nil and min-weight = nil
+		 for layer-node = (head (layer-dlist net)) then (next layer-node)
+		 while layer-node
+		 do (loop with layer = (value layer-node) 
+					 for neuron-node = (head layer) then (next neuron-node)
+					 while neuron-node
+					 for neuron = (value neuron-node)
+					 do (loop for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+								 while cx-node
+								 for cx = (value cx-node)
+								 for weight = (weight cx)
+								 when (or (null max-weight) (> weight max-weight))
+								 do (setf max-weight weight)
+								 when (or (null min-weight) (< weight min-weight))
+								 do (setf min-weight weight)))
+		 finally 
+			 (setf (max-weight net) max-weight)
+			 (setf (min-weight net) min-weight)))
+
 (defun training-complete (id presentation start-time network-error)
   (stop-thread-pool)
   (let* ((environment (getf *environments* id))
@@ -1439,6 +1515,7 @@
               (getf fitness :pass)
               (getf fitness :total)))
     (set-training-in-progress nil)
+		(set-weight-range (net environment))
     (collect-weights-into-file (net environment))))
 
 (defun wait-for-training-completion (id)
@@ -1688,10 +1765,16 @@
                                         
 ;;; clim
 
+(defparameter *bianet-frame* nil)
+
 (define-application-frame bianet ()
-	()
+	((net :accessor net :initarg :net :initform nil)
+	 (zoom :accessor zoom :initarg :zoom :initform 100)
+	 (radius :accessor radius :initarg :radius :initform 2)
+	 (hi-pass :accessor hi-pass :initarg :hi-pass :initform 0.8)
+	 (lo-pass :accessor lo-pass :initarg :lo-pass :initform 0.2))
 	(:geometry :width 1200 :height 800)
-	(:menu-bar nil)
+	(:menu-bar t)
 	(:panes
 	 (network :application :display-time t :display-function #'render-neural-network)
 	 (neuron :application :width 300)
@@ -1702,28 +1785,55 @@
 									(4/8 (horizontally ()
 												 (:fill network)
 												 neuron))
-									(3/8 training-error)
-									(1/8 input)))))
+									(2/8 training-error)
+									(2/8 input)))))
 
 (defun render-neural-network (frame pane)
-	(declare (ignore frame))
-	(loop with height = (bounding-rectangle-height (window-viewport pane))
-		 and top-margin = 10
-		 and bottom-margin = 10
-		 and left-margin = 10
-		 with layer-height = (/ (- height top-margin bottom-margin) (len (layer-dlist *net*)))
-		 for layer = (head (layer-dlist *net*)) then (next layer)
-		 for y = top-margin then (+ y layer-height)
-		 while layer
-		 do (loop for neuron = (head (value layer)) then (next neuron)
-					 for x = left-margin then (+ x 3)
-					 while neuron
-					 do (draw-point* pane x y :ink +black+ :line-thickness 2))))
+	(loop with net = (net frame)
+		 and width = (bounding-rectangle-width pane)
+		 and height = (bounding-rectangle-height pane)
+		 with min-weight = (min-weight net)
+		 with weight-span = (- (max-weight net) min-weight)
+		 initially (window-clear pane)
+		 for layer-node = (head (layer-dlist net)) then (next layer-node)
+		 while layer-node do
+			 (loop with layer = (value layer-node) 
+					for neuron-node = (head layer) then (next neuron-node)
+					while neuron-node
+					for neuron = (value neuron-node)
+					for x = (truncate (* width (x-coor neuron) (/ (zoom frame) 100)))
+					for y = (truncate (* height (y-coor neuron) (/ (zoom frame) 100)))
+					do (draw-circle* pane x y (radius frame) 
+													 :ink +black+ :line-thickness 1 :filled nil)
+						(loop for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+							 while cx-node
+							 for cx = (value cx-node)
+							 for target-neuron = (target cx)
+							 for target-x = (truncate (* width (x-coor target-neuron) (/ (zoom frame) 100)))
+							 for target-y = (truncate (* height (y-coor target-neuron) (/ (zoom frame) 100)))
+							 for luminosity = (/ (- (weight cx) min-weight) weight-span)
+							 when (or (< luminosity (lo-pass frame)) (> luminosity (hi-pass frame)))
+							 do (draw-line* pane x y target-x target-y 
+															:ink (make-gray-color luminosity) :line-thickness 1)))
+		 finally (format pane "~%~%")))
 
+(define-bianet-command (com-zoom :menu t :name "Zoom")
+		((zoom 'integer))
+	(setf (zoom *bianet-frame*) zoom)
+	(setf (pane-needs-redisplay (get-frame-pane *bianet-frame* 'network)) t))
 
-(defparameter *bianet-frame* nil)
+(define-bianet-command (com-radius :menu t :name "Radius")
+		((radius 'integer))
+	(setf (radius *bianet-frame*) radius)
+	(setf (pane-needs-redisplay (get-frame-pane *bianet-frame* 'network)) t))
 
-(defun run ()
-	(setf *bianet-frame* (make-application-frame 'bianet))
+(define-bianet-command (com-luminosity-filter :menu t :name "Luminosity Filter")
+		((lo-pass 'float) (hi-pass 'float))
+	(setf (lo-pass *bianet-frame*) lo-pass
+				(hi-pass *bianet-frame*) hi-pass)
+	(setf (pane-needs-redisplay (get-frame-pane *bianet-frame* 'network)) t))
+
+(defun run (net)
+	(setf *bianet-frame* (make-application-frame 'bianet :net net))
 	(make-thread (lambda () (run-frame-top-level *bianet-frame*))
 							 :name "bianet-frame"))
