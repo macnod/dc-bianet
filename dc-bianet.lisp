@@ -721,6 +721,7 @@
                            (skip-refresh t))
   (when (get-training-in-progress)
     (error "Training is already in progress."))
+	(create-directory *log-folder* :with-parents t)
   (with-open-file (stream (log-file (net environment))
                           :direction :output
                           :if-does-not-exist :create
@@ -1148,20 +1149,16 @@
 (defun place-neurons (net)
 	(loop with height = 1.0
 		 and width = 1.0
-		 and top-margin = 0.05
-		 and bottom-margin = 0.05
-		 and left-margin = 0.05
-		 and right-margin = 0.05
-		 with y-spacing = (/ (- height top-margin bottom-margin) (1- (layer-count net)))
+		 with y-spacing = (/ height (1- (layer-count net)))
 		 for layer-node = (head (layer-dlist net)) then (next layer-node)
 		 while layer-node
 		 for layer = (value layer-node)
-		 for y = top-margin then (+ y y-spacing)
-		 for x-spacing = (/ (- width left-margin right-margin) (len layer))
+		 for y = 0 then (+ y y-spacing)
+		 for x-spacing = (/ width (len layer))
 		 do (loop for neuron-node = (head layer) then (next neuron-node)
 					 while neuron-node
 					 for neuron = (value neuron-node)
-					 for x = (+ left-margin (/ x-spacing 2)) then (+ x x-spacing)
+					 for x = (/ x-spacing 2) then (+ x x-spacing)
 					 do (setf (x-coor neuron) x
 										(y-coor neuron) y))))
 
@@ -1695,7 +1692,6 @@
      while (< (expt 2 power) output-count)
      finally (return (list input-count (expt 2 (1+ power)) output-count))))
 
-
 (defun evaluate-topologies (&key
                               (id :zero-or-one)
                               (inputs 784)
@@ -1793,14 +1789,17 @@
 									(2/8 input)))))
 
 (defun render-neural-network (frame pane)
-	(loop with net = (net frame)
-		 and width = (bounding-rectangle-width pane)
-		 and height = (bounding-rectangle-height pane)
-		 with min-weight = (min-weight net)
-		 with weight-span = (- (max-weight net) min-weight)
+	(loop 
+		 with h-margin = 20 
+		 and v-margin = 20
 		 and lf-enabled = (lf-enabled frame)
 		 and lf-lo-pass = (lf-lo-pass frame)
 		 and lf-hi-pass = (lf-hi-pass frame)
+		 with net = (net frame)
+		 and width = (- (bounding-rectangle-width pane) (* h-margin 2))
+		 and height = (- (bounding-rectangle-height pane) (* v-margin 2))
+		 with min-weight = (min-weight net)
+		 with weight-span = (- (max-weight net) min-weight)
 		 initially (window-clear pane)
 		 for layer-node = (head (layer-dlist net)) then (next layer-node)
 		 while layer-node do
@@ -1808,16 +1807,16 @@
 					for neuron-node = (head layer) then (next neuron-node)
 					while neuron-node
 					for neuron = (value neuron-node)
-					for x = (truncate (* width (x-coor neuron) (/ (zoom frame) 100)))
-					for y = (truncate (* height (y-coor neuron) (/ (zoom frame) 100)))
+					for x = (truncate (+ h-margin (* width (x-coor neuron) (/ (zoom frame) 100))))
+					for y = (truncate (+ v-margin (* height (y-coor neuron) (/ (zoom frame) 100))))
 					do (draw-circle* pane x y (radius frame) 
 													 :ink +black+ :line-thickness 1 :filled nil)
 						(loop for cx-node = (head (cx-dlist neuron)) then (next cx-node)
 							 while cx-node
 							 for cx = (value cx-node)
 							 for target-neuron = (target cx)
-							 for target-x = (truncate (* width (x-coor target-neuron) (/ (zoom frame) 100)))
-							 for target-y = (truncate (* height (y-coor target-neuron) (/ (zoom frame) 100)))
+							 for target-x = (truncate (+ h-margin (* width (x-coor target-neuron) (/ (zoom frame) 100))))
+							 for target-y = (truncate (+ v-margin (* height (y-coor target-neuron) (/ (zoom frame) 100))))
 							 for luminosity = (let ((l (/ (- (weight cx) min-weight) weight-span)))
 																	(cond ((< l 0.0) 0.0) ((> l 1.0) 1.0) (t l)))
 							 when (or (not lf-enabled) 
@@ -1826,6 +1825,11 @@
 							 do (draw-line* pane x y target-x target-y 
 															:ink (make-gray-color luminosity) :line-thickness 1)))
 		 finally (format pane "~%~%")))
+
+(define-bianet-command (com-fit :menu t :name "Fit")
+		()
+	(setf (zoom *bianet-frame*) 100)
+	(setf (pane-needs-redisplay (get-frame-pane *bianet-frame* 'network)) t))
 
 (define-bianet-command (com-zoom :menu t :name "Zoom")
 		((zoom 'integer))
