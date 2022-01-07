@@ -1777,7 +1777,10 @@
 	(:geometry :width 1200 :height 800)
 	(:menu-bar t)
 	(:panes
-	 (network :application :display-time t :display-function #'render-neural-network)
+	 (network :application 
+						:incremental-redisplay nil
+						:display-time :command-loop
+						:display-function #'render-neural-network)
 	 (neuron :application :width 300)
 	 (training-error :application)
 	 (input :interactor :width 400))
@@ -1840,6 +1843,9 @@
 				(lf-hi-pass *bianet-frame*) hi-pass
 				(lf-enabled *bianet-frame*) (not (zerop enabled)))
 	(setf (pane-needs-redisplay (get-frame-pane *bianet-frame* 'network)) t))
+
+(defmethod handle-event ((frame bianet) (event window-configuration-event))
+	(redisplay-frame-pane frame (get-frame-pane frame 'network)))
 
 (defun run (net)
 	(setf *bianet-frame* (make-application-frame 'bianet :net net))
