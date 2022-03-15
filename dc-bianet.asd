@@ -16,7 +16,9 @@
                #:swank
                #:dc-db
 							 #:mcclim
-							 #:clim-lisp)
+							 #:clim-lisp
+							 #:hunchentoot
+							 #:defrest)
   :serial t
   :components ((:file "dc-bianet-package")
                (:file "dc-bianet")))

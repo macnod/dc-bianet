@@ -33,6 +33,9 @@
 ;; Current environment
 (defparameter *environment* nil)
 (defparameter *net* nil)
+(defparameter *neuron-id-index* nil)
+(defparameter *neuron-name-index* nil)
+(defparameter *neuron-layer-index* nil)
 (defparameter *network-error* 0.0)
 (defparameter *training-set* nil)
 (defparameter *test-set* nil)
@@ -1472,7 +1475,30 @@
   (setf *net* (net *environment*)
         *training-set* (training-set *environment*)
         *test-set* (test-set *environment*))
+	(index-neurons *net*)
   *environment*)
+
+(defun index-neurons (net)
+	(loop with count = (neuron-count net)
+		 initially
+			 (setf *neuron-id-index* (make-hash-table :test 'equal :size count)
+						 *neuron-name-index* (make-hash-table :test 'equal :size count)
+						 *neuron-layer-index* (make-hash-table :test 'equal :size count))
+		 for layer-node = (head (layer-dlist net)) then (next layer-node)
+		 for layer-index = 1 then (1+ layer-index)
+		 while layer-node
+		 do (loop with layer = (value layer-node)
+					 for neuron-node = (head layer) then (next neuron-node)
+					 while neuron-node
+					 for neuron-index = 1 then (1+ neuron-index)
+					 for neuron = (value neuron-node)
+					 for id = (format nil "~(~a~)" (id neuron))
+					 for name = (name neuron)
+					 for index = (format nil "~d-~d" layer-index neuron-index)
+					 do
+						 (setf (gethash id *neuron-id-index*) neuron)
+						 (setf (gethash name *neuron-name-index*) neuron)
+						 (setf (gethash index *neuron-layer-index*) neuron))))	
 
 (defun set-weight-range (net)
   (loop with max-weight = nil and min-weight = nil
@@ -1858,3 +1884,36 @@
   (setf *bianet-frame* (make-application-frame 'bianet :net net))
   (make-thread (lambda () (run-frame-top-level *bianet-frame*))
                :name "bianet-frame"))
+
+
+;;
+;; Rest interface
+;;
+
+(defun start-web-server (&optional (port 4243))
+	(hunchentoot:start (make-instance 'hunchentoot:easy-acceptor :port port))
+	(push (create-rest-table-dispatcher) hunchentoot:*dispatch-table*))
+
+
+(defrest "/network/{neuron-id:[-a-zA-Z0-9_]+}" :get (neuron-id)
+	(let ((neuron (gethash neuron-id *neuron-id-index*)))
+		(ds-to-json
+		 (if neuron
+				 (ds `(:map 
+							 :id ,(id neuron)
+							 :name ,(name neuron)
+							 :input ,(input neuron)
+							 :biased ,(biased neuron)
+							 :transfer-key ,(format nil "~(~a~)" (transfer-key neuron))
+							 :output ,(output neuron)
+							 :expected-output ,(expected-output neuron)
+							 :err ,(err neuron)
+							 :connections ,(loop for cx-node = (head (cx-dlist neuron))
+																then (next cx-node)
+																while cx-node
+																for cx = (value cx-node)
+																for target-id = (id (target cx))
+																for weight = (weight cx)
+																collect (list :target target-id 
+																							:weight weight))))
+				 (ds '(:map :error "Not found"))))))

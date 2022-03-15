@@ -11,6 +11,8 @@
         :dc-utilities
         :dc-db
 				:clim
-				:clim-lisp)
+				:clim-lisp
+				:defrest
+				:hunchentoot)
   (:shadow :range))
 
