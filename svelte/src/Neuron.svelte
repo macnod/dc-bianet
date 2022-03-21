@@ -1,45 +1,73 @@
 <script>
-	import { onMount } from 'svelte'
+	$: incoming = findIncoming(selected)
+	$: outgoing = findOutgoing(selected)
+	$: neuron = findNeuron(selected)
 
-	$: connections = findConnections(selected)
  	export let elements
 	export let selected
 
-	function findConnections(selected) {
+	function findIncoming(selected) {
+		return elements.filter(n => {
+		  return n.group == 'edges' && n.data.target == selected;
+		})
+	}
+
+	function findOutgoing(selected) {
 		return elements.filter(n => {
 		  return n.group == 'edges' && n.data.source == selected;
 		})
 	}
 
-	onMount(() => connections = findConnections(selected))
-
+	function findNeuron(selected) {
+		return elements.filter(n => {
+			return n.group == 'nodes' && n.data.id == selected;
+		})[0]
+	}
 </script>
 
 <h1>Node</h1>
 <input bind:value={selected}/><br/>
-Connections:
+ID: {neuron.data.id}<br/>
 <div class="connections-pane">
-<table class="connections">
-	<tr>
-		<th class="target-id-header">T</th>
-		<th class="target-weight-header">W</th>
-	</tr>
-	{#each connections as cx}
+	<p> Incoming:</p>
+	<table class="connections">
 		<tr>
-			<td class="target-id-cell target-cell">{
-				cx.data.target
-		  }</td>
-			<td class="target-weight-cell target-cell">{
-				(Math.round(cx.data.weight * 100) / 100).toFixed(4)
-		  }</td>
+			<th class="target-id-header">S</th>
+			<th class="target-id-header">T</th>
+			<th class="target-weight-header">W</th>
+ 		</tr>
+		{#each incoming as cx}
+			<tr>
+				<td class="target-id-cell target-cell">{cx.data.source}</td>
+				<td class="target-id-cell target-cell">{cx.data.target}</td>
+				<td class="target-weight-cell target-cell">{
+					(Math.round(cx.data.weight * 100) / 100).toFixed(4)
+					}</td>
+			</tr>
+		{/each}
+	</table>
+	<p>Outgoing:</p>
+	<table class="connections">
+		<tr>
+			<th class="target-id-header">S</th>
+			<th class="target-id-header">T</th>
+			<th class="target-weight-header">W</th>
 		</tr>
-	{/each}
-</table>
+		{#each outgoing as cx}
+			<tr>
+				<td class="target-id-cell target-cell">{cx.data.source}</td>
+				<td class="target-id-cell target-cell">{cx.data.target}</td>
+				<td class="target-weight-cell target-cell">{
+					(Math.round(cx.data.weight * 100) / 100).toFixed(4)
+					}</td>
+			</tr>
+		{/each}
+	</table>
 </div>
-			
+
 <style>
 	.connections-pane {
-		height: 440px;
+		height: 60%;
 		overflow-y: scroll;
 	}
 
@@ -51,7 +79,7 @@ Connections:
 		font-size: 75%;
 		padding: 0px;
 	}
-	
+
 	.target-id-cell {
 		text-align: left;
 	}

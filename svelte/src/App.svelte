@@ -76,6 +76,7 @@
 	#container {
 		overflow: hidden;
 		width: 100%;
+		height: 450px;
 	}
 
 	.child {
@@ -84,13 +85,13 @@
 
 	#graph-container {
 		width: 70%;
-		height: 440px;
+		height: 100%
 	}
 
 	#neuron-container {
 		width: 25%;
 		padding: 10px;
-		height: 400px;
+		height: 100%
 	}
 
 	@media (min-width: 640px) {
