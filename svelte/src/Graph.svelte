@@ -44,17 +44,29 @@
 			layout: {
 				name: 'breadthfirst',
 				directed: true,
-				avoidOverlap: true
+				avoidOverlap: true,
+				transform: function (node, position) {
+					position.y = position.y * 4
+					return position;
+				}
 			},
 			zoom: 1
 		})
 		toggleEdges()
 		cy.on('viewport', hideNodes)
 		cy.on('tap', function(event) {
-			selected = event.target.data().id
-			dispatch('selected', {id: selected})
+			var data = event.target.data()
+			if (!isEmpty(data)) {
+				selected = data.id
+				dispatch('selected', {id: selected})
+			}
 		})
+		toggleEdges()
 	})
+
+	function isEmpty(object) {
+		return Object.keys(object).length == 0;
+	}
 
 	function toggleEdges() {
 		edgesVisible = !edgesVisible
