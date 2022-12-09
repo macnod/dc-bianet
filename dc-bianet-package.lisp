@@ -9,6 +9,7 @@
         :sb-thread
         :zpng
         :vgplot
+        :vecto
         :dc-utilities
         :dc-db)
   (:shadow :range))

@@ -201,6 +201,8 @@
    (target :reader target :initarg :target :type t-neuron
            :initform (error ":target required"))
    (weight :accessor weight :initarg :weight :initform 0.1 :type single-float)
+   (weight-dlist :accessor weight-dlist :type dlist 
+                 :initform (make-instance 'dlist :limit 10))
    (learning-rate :accessor learning-rate :initarg :learning-rate 
                   :type single-float :initform 0.02)
    (momentum :accessor momentum :initarg :momentum :type single-float 
@@ -478,6 +480,10 @@
        while neuron-node
        collect (value neuron-node))))
 
+(defmethod neuron-count ((net t-net))
+  (loop for node = (head (layer-dlist net)) then (next node)
+        while node summing (len (value node))))
+
 (defun neuron-by-name (structure name)
   (car (remove-if-not (lambda (n) (equal name (name n)))
                       (collect-neurons structure))))
@@ -515,6 +521,20 @@
      for neuron-node = (head output-layer) then (next neuron-node)
      while neuron-node collect (expected-output (value neuron-node))))
 
+(defgeneric collect-cxs (thing)
+  (:method ((net t-net))
+    (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
+          while layer-node
+          appending (collect-cxs (value layer-node))))
+  (:method ((layer dlist))
+    (loop for neuron-node = (head layer) then (next neuron-node)
+          while neuron-node
+          appending (collect-cxs (value neuron-node))))
+  (:method ((neuron t-neuron))
+    (loop for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+          while cx-node
+          collect (value cx-node))))
+  
 (defgeneric collect-weights (thing)
   (:method ((net t-net))
     (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
@@ -1269,8 +1289,8 @@
 
 (defun create-environment
     (id
-     topology
      &key 
+       (topology '(784 16 2))
        (home-folder (join-paths (namestring (user-homedir-pathname))
                                 "common-lisp" "dc-bianet"))
        (test-file "mnist-0-1-test.csv")
@@ -1356,6 +1376,75 @@
          (outputs (gethash label (label->expected-outputs environment))))
     (list inputs outputs)))
 
+(defun png-file->pixels (file &key 
+                                (target-width 28) 
+                                (target-height 28))
+  "Read the given PNG file and turns its data into rows of floating
+point values that represent the intensity of each pixel, after the
+image has been converted to black and white.  The intensity is given
+by a floating-point value in the range 1 to 1, where 0 is black and 1
+is white.  The length of the rows corresponds to the width of the
+image represented by the resulting pixels.  The number of rows represents 
+the hight of image represented by the resulting pixels.  That width 
+and height is given by the target-width and target-height parameters,
+and this function adjusts the image retreived from the file to fit into
+the given width and height.
+"
+  (loop with image-data = (png-read:image-data
+                           (png-read:read-png-file file))
+        and target-array = (make-array
+                            (list target-width target-height))
+        with dimensions = (array-dimensions image-data)
+        with x-max = (elt dimensions 0)
+        and y-max = (elt dimensions 1)
+        and c-max = (if (> (length dimensions) 2) (elt dimensions 2) 0)
+        with x-delta = (/ (float x-max) (float target-width))
+        and y-delta = (/ (float y-max) (float target-height))
+        and max-intensity = (float (if (zerop c-max) 255 (* c-max 255)))
+        initially (format t "x-max=~d; y-max=~d; c-max=~d; x-delta=~d; y-delta=~d"
+                          x-max y-max c-max x-delta y-delta)
+
+        for y-source from 0.0 below y-max by y-delta
+        for y-source-int = (truncate y-source)
+        for y-target = 0 then (min (1+ y-target) (1- target-height))
+        do
+           (loop for x-source from 0.0 below x-max by x-delta
+                 for x-source-int = (truncate x-source)
+                 for x-target = 0 then (min (1+ x-target) (1- target-width))
+                 for intensity = (/ (float
+                                     (if (zerop c-max)
+                                         (aref image-data x-source-int y-source-int)
+                                         (loop for c from 0 below c-max 
+                                               summing (aref image-data 
+                                                             x-source-int
+                                                             y-source-int
+                                                             c))))
+                                    max-intensity)
+                 do (setf (aref target-array 
+                                (truncate x-target)
+                                (truncate y-target))
+                             (- 1.0 intensity)))
+        finally (return (loop for y from 0 below target-height
+                              collect (loop for x from 0 below target-width
+                                            collect (aref target-array x y))))))
+
+(defun pixels->png-file (intensities file &key (width 280) (height 280))
+  (with-canvas (:width width :height height)
+    (loop with iw = (length (car intensities)) and ih = (length intensities)
+          with dx = (/ (float width) (float iw))
+          and dy = (/ (float height) (float ih))
+          initially (set-line-width 0)
+                    (format t "~a" (list :dx dx :dy dy))
+          for row in intensities
+          for y = 0.0 then (+ y dy)
+          do (loop for i in row
+                   for x = 0.0 then (+ x dx)
+                   do
+                      (set-rgb-fill i i i)
+                      (rectangle (truncate x) (truncate y) (truncate (+ x dx)) (truncate (+ y dy)))
+                      (fill-path))
+          finally (save-png file))))
+        
 (defun drop-environment (id)
   (remf *environments* id)
   (when (and *environment* (equal (id *environment*) id))
@@ -1388,6 +1477,8 @@
                    skip-refresh)
   (let ((environment (getf *environments* id)))
     (when (not environment) (error "No such environment ~(~a~)" id))
+    (unless (directory-exists-p (path-only (log-file *net*)))
+      (create-directory (path-only (log-file *net*))))
     (when (or reset-weights (not weights-file))
       (clear (training-error environment)))
     (when weights-file
@@ -1633,7 +1724,8 @@
   (loop with row-format = "|~{ ~a | ~}"
      for hidden from hidden-start to hidden-stop by hidden-step
      for environment = (create-environment
-                        id (list inputs hidden outputs)
+                        id 
+                        :topology (list inputs hidden outputs)
                         :training-file training-file
                         :test-file test-file
                         :weight-reset-function init-weights-function)
@@ -1666,7 +1758,8 @@
   (loop with row-format = "|~{ ~a | ~}"
      for iteration from 1 to iterations
      for environment = (create-environment
-                        id (list inputs hidden-units outputs)
+                        id 
+                        :topology (list inputs hidden-units outputs)
                         :training-file training-file
                         :test-file test-file
                         :weight-reset-function init-weights-function)
@@ -1686,3 +1779,4 @@
               lines)
        (return (format nil "~{~a~%~}" lines))))
                                         
+
