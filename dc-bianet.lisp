@@ -24,8 +24,7 @@
 (defparameter *home-folder* (join-paths (namestring (user-homedir-pathname))
                                         "common-lisp" "dc-bianet"))
 
-(defparameter *log-folder* "/tmp/bianet-logs")
-(defparameter *db-log-file* "db.log")
+(defparameter *log-folder* "/tmp/bianet-logs/")
 
 (defparameter *environments* nil) ;; p-list of id -> environment
 
@@ -36,17 +35,9 @@
 (defparameter *training-set* nil)
 (defparameter *test-set* nil)
 
-(defun db-log (message)
-  (with-open-file (out (join-paths *log-folder* *db-log-file*)
-                       :direction :output
-                       :if-exists :append
-                       :if-does-not-exist :create)
-    (write-line (timestamp :string message) out)))
-
-;; Database
-(defparameter *db* (funcall #'ds (cons :map (slurp-n-thaw (join-paths *home-folder* "db-conf.lisp")))))
-(ds-set *db* :log-function #'db-log)
-(ensure-directories-exist *log-folder*)
+(ensure-directories-exist (format nil "~a~a" 
+                                  *log-folder*
+                                  (if (ppcre:scan "/$" *log-folder*) "" "/")))
 
 (defun start-swank-server ()
   (loop for potential-port = 4005 then (1+ potential-port) 
@@ -157,6 +148,12 @@
         ((< (the single-float (abs x)) (the single-float 1e-8)) (the single-float 0.5))
         (t (/ (the single-float 1.0) (the single-float (1+ (the single-float (exp (- x)))))))))
 
+(defun logistic-slow (x)
+  (cond ((> x 16.64) 1.0)
+        ((< x -88.7) 0.0)
+        ((< (abs x) 1e-8) 0.5)
+        (t (/ 1 (1+ (exp (- x)))))))
+
 (defun logistic-derivative (x)
   (declare (single-float x)
            (optimize (speed 3) (safety 0)))
@@ -210,7 +207,7 @@
 
 (defclass t-neuron ()
   ((id :accessor id :initarg :id :type keyword :initform (bianet-id))
-   (name :accessor name :initarg :name :type string :initform nil)
+   (name :accessor name :initarg :name :type string :initform "")
    (input :accessor input :type single-float :initform 0.0)
    (biased :accessor biased :initarg :biased :type boolean :initform nil)
    (transfer-key :accessor transfer-key :initarg :transfer-key 
@@ -257,7 +254,7 @@
    (layer-dlist :accessor layer-dlist :type dlist :initform (make-instance 'dlist))
    (log-file :accessor log-file :initarg :log-file :initform nil)
    (weights-file :accessor weights-file :initarg :weights-file :initform nil)
-   (rstate :reader rstate :initform (make-random-state))
+   (rstate :accessor rstate :initform (make-random-state))
    (initial-weight-function 
     :accessor initial-weight-function
     :initarg :initial-weight-function
@@ -266,6 +263,9 @@
     :accessor connect-function
     :initarg :connect-function
     :initform (error ":connect-function is required"))))
+
+(defmethod reset-random-state ((net t-net))
+  (setf (rstate net) (make-random-state)))
 
 (defclass t-environment ()
   ((id :accessor id :initarg :id :type keyword)
@@ -559,7 +559,9 @@
        do (setf (weight cx) weight))))
 
 (defun reset-weights (net)
-  (loop with global-index = 0 
+  (loop 
+    initially (reset-random-state net)
+    with global-index = 0 
      and global-count = (length (collect-weights net))
      for layer-node = (head (layer-dlist net)) then (next layer-node)
      while layer-node
@@ -755,7 +757,8 @@
      with frame-errors = (make-array sample-size 
                                      :element-type 'float 
                                      :initial-element 1.0)
-     for indexes = (shuffle (loop for a from 0 below sample-size collect a))
+     for indexes = (shuffle (loop for a from 0 below sample-size collect a)
+                            net)
      for epoch from 1 to epochs
      for network-error = (average frame-errors)
      while (and
@@ -1275,7 +1278,6 @@
                                 "common-lisp" "dc-bianet"))
        (test-file "mnist-0-1-test.csv")
        (training-file "mnist-0-1-train.csv")
-       (weight-reset-function (make-random-weight-fn :min -0.5 :max 0.5))
        (make-current t)
        (cx-mode :full)
        (cx-params 12)
@@ -1302,7 +1304,6 @@
          (net (create-standard-net
                topology
                :id id
-               :weight-reset-function weight-reset-function
                :cx-mode cx-mode
                :cx-params cx-params
                :learning-rate learning-rate
@@ -1398,6 +1399,7 @@
       (title (format nil "~(~a~) ~{~a~^-~} Training Error"
                      id (simple-topology (net environment))))
       (axis (list t t 0 1.0)))
+    (ensure-directories-exist *log-folder*)
     (start-thread-pool thread-count)
     (train-frames environment
                   (training-set environment)
@@ -1448,13 +1450,13 @@
        finally (return (cons (getf (fitness environment) :percent)
                              (value (tail (training-error environment))))))))
   
-(defun shuffle (seq)
+(defun shuffle (seq net)
   "Return a sequence with the same elements as the given sequence S, but in random order (shuffled)."
   (loop
      with l = (length seq) 
      with w = (make-array l :initial-contents seq)
      for i from 0 below l 
-     for r = (random l) 
+     for r = (random l (rstate net))
      for h = (aref w i)
      do 
        (setf (aref w i) (aref w r)) 
@@ -1618,71 +1620,70 @@
      while (< (expt 2 power) output-count)
      finally (return (list input-count (expt 2 (1+ power)) output-count))))
 
+;; (defun evaluate-topologies (&key
+;;                               (id :zero-or-one)
+;;                               (inputs 784)
+;;                               (outputs 2)
+;;                               (hidden-start 16)
+;;                               (hidden-stop 32)
+;;                               (hidden-step 16)
+;;                               (training-file "mnist-0-1-train.csv")
+;;                               (test-file "mnist-0-1-test.csv")
+;;                               (init-weights-function (make-random-weight-fn))
+;;                               (report-frequency 1))
+;;   (loop with row-format = "|~{ ~a | ~}"
+;;      for hidden from hidden-start to hidden-stop by hidden-step
+;;      for environment = (create-environment
+;;                         id (list inputs hidden outputs)
+;;                         :training-file training-file
+;;                         :test-file test-file
+;;                         :weight-reset-function init-weights-function)
+;;      for training = (progn (train id :report-frequency report-frequency)
+;;                            (format t "~a~%" (log-file *net*)))
+;;      for (fitness elapsed presentations network-error) =
+;;        (wait-for-training-completion id)
+;;      do (format t "fit=~,2f%; hidden=~d; secs=~d; presented=~d; error=~d~%"
+;;                 fitness hidden elapsed presentations network-error)
+;;      collect (format nil row-format
+;;                      (list fitness hidden elapsed presentations network-error))
+;;      into lines
+;;      finally (push
+;;               (format nil row-format
+;;                       '("fitness" "hidden" "elapsed" "presentations"
+;;                         "network-error"))
+;;               lines)
+;;        (return (format nil "~{~a~%~}" lines))))
 
-(defun evaluate-topologies (&key
-                              (id :zero-or-one)
-                              (inputs 784)
-                              (outputs 2)
-                              (hidden-start 16)
-                              (hidden-stop 32)
-                              (hidden-step 16)
-                              (training-file "mnist-0-1-train.csv")
-                              (test-file "mnist-0-1-test.csv")
-                              (init-weights-function (make-random-weight-fn))
-                              (report-frequency 1))
-  (loop with row-format = "|~{ ~a | ~}"
-     for hidden from hidden-start to hidden-stop by hidden-step
-     for environment = (create-environment
-                        id (list inputs hidden outputs)
-                        :training-file training-file
-                        :test-file test-file
-                        :weight-reset-function init-weights-function)
-     for training = (progn (train id :report-frequency report-frequency)
-                           (format t "~a~%" (log-file *net*)))
-     for (fitness elapsed presentations network-error) =
-       (wait-for-training-completion id)
-     do (format t "fit=~,2f%; hidden=~d; secs=~d; presented=~d; error=~d~%"
-                fitness hidden elapsed presentations network-error)
-     collect (format nil row-format
-                     (list fitness hidden elapsed presentations network-error))
-     into lines
-     finally (push
-              (format nil row-format
-                      '("fitness" "hidden" "elapsed" "presentations"
-                        "network-error"))
-              lines)
-       (return (format nil "~{~a~%~}" lines))))
-
-(defun evaluate-convergence-variance (&key
-                                        (id :zero-or-none)
-                                        (inputs 784)
-                                        (outputs 2)
-                                        (hidden-units 16)
-                                        (iterations 5)
-                                        (training-file "mnist-0-1-train.csv")
-                                        (test-file "mnist-0-1-test.csv")
-                                        (init-weights-function (make-random-weight-fn))
-                                        (report-frequency 1))
-  (loop with row-format = "|~{ ~a | ~}"
-     for iteration from 1 to iterations
-     for environment = (create-environment
-                        id (list inputs hidden-units outputs)
-                        :training-file training-file
-                        :test-file test-file
-                        :weight-reset-function init-weights-function)
-     for training = (progn (train id :report-frequency report-frequency)
-                           (format t "~a~%" (log-file *net*)))
-     for (fitness elapsed presentations network-error) =
-       (wait-for-training-completion id)
-     do (format t "fit=~,2f%; hidden=~d; secs=~d; presented=~d; error=~d~%"
-                fitness hidden-units elapsed presentations network-error)
-     collect (format nil row-format
-                     (list fitness hidden-units elapsed presentations network-error))
-     into lines
-     finally (push
-              (format nil row-format
-                      '("fitness" "hidden" "elapsed" "presentations"
-                        "network-error"))
-              lines)
-       (return (format nil "~{~a~%~}" lines))))
+;; (defun evaluate-convergence-variance (&key
+;;                                         (id :zero-or-none)
+;;                                         (inputs 784)
+;;                                         (outputs 2)
+;;                                         (hidden-units 16)
+;;                                         (iterations 5)
+;;                                         (training-file "mnist-0-1-train.csv")
+;;                                         (test-file "mnist-0-1-test.csv")
+;;                                         (init-weights-function (make-random-weight-fn))
+;;                                         (report-frequency 1))
+;;   (loop with row-format = "|~{ ~a | ~}"
+;;      for iteration from 1 to iterations
+;;      for environment = (create-environment
+;;                         id (list inputs hidden-units outputs)
+;;                         :training-file training-file
+;;                         :test-file test-file
+;;                         :weight-reset-function init-weights-function)
+;;      for training = (progn (train id :report-frequency report-frequency)
+;;                            (format t "~a~%" (log-file *net*)))
+;;      for (fitness elapsed presentations network-error) =
+;;        (wait-for-training-completion id)
+;;      do (format t "fit=~,2f%; hidden=~d; secs=~d; presented=~d; error=~d~%"
+;;                 fitness hidden-units elapsed presentations network-error)
+;;      collect (format nil row-format
+;;                      (list fitness hidden-units elapsed presentations network-error))
+;;      into lines
+;;      finally (push
+;;               (format nil row-format
+;;                       '("fitness" "hidden" "elapsed" "presentations"
+;;                         "network-error"))
+;;               lines)
+;;        (return (format nil "~{~a~%~}" lines))))
                                         

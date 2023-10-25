@@ -12,9 +12,9 @@
                #:png-read
                #:vgplot
                #:cl-ppcre
-               #:dc-utilities
                #:swank
-               #:dc-db)
+               #:dc-eclectic
+               #:dc-ds)
   :serial t
   :components ((:file "dc-bianet-package")
                (:file "dc-bianet")))

@@ -9,7 +9,6 @@
         :sb-thread
         :zpng
         :vgplot
-        :dc-utilities
-        :dc-db)
+        :dc-eclectic
+        :dc-ds)
   (:shadow :range))
-
