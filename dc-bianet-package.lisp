@@ -10,5 +10,7 @@
         :zpng
         :vgplot
         :dc-eclectic
-        :dc-ds)
+        :dc-ds
+        :vecto)
+>>>>>>> origin/master
   (:shadow :range))
