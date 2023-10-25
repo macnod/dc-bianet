@@ -199,7 +199,7 @@
            :initform (error ":target required"))
    (weight :accessor weight :initarg :weight :initform 0.1 :type single-float)
    (weight-dlist :accessor weight-dlist :type dlist 
-                 :initform (make-instance 'dlist :limit 10))
+                 :initform (make-instance 'dlist))
    (learning-rate :accessor learning-rate :initarg :learning-rate 
                   :type single-float :initform 0.02)
    (momentum :accessor momentum :initarg :momentum :type single-float 

@@ -12,5 +12,4 @@
         :dc-eclectic
         :dc-ds
         :vecto)
->>>>>>> origin/master
   (:shadow :range))
