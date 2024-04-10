@@ -18,3 +18,13 @@
                                       (file-namestring source))
              do (ensure-directories-exist target)
                 (rename-file source target))))
+
+;; (defun directory-tree-to-csv (&key
+;;                               (root-directory
+;;                                "/home/macnod/data/mnist-images/train"))
+;;   (loop
+;;     with labels = (mapcar
+;;                    (lambda (s) (car (reverse (split "/" (format nil "~a" s)))))
+;;                    (uiop:subdirectories root-directory))
+;;     for label in labels
+;;     for label-files 
