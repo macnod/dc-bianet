@@ -778,7 +778,7 @@
                                      :element-type 'float 
                                      :initial-element 1.0)
      for indexes = (shuffle (loop for a from 0 below sample-size collect a)
-                            net)
+                            (rstate net))
      for epoch from 1 to epochs
      for network-error = (average frame-errors)
      while (and
@@ -1269,13 +1269,15 @@
 
 (defun type-1-csv-line->label-and-inputs (csv-line)
   (loop with word = nil
-     for c across csv-line
-     if (char= c #\,) collect (reverse word) into words and do (setf word nil)
-     else do (push c word)
-     finally (return (loop for chars in (reverse (cons (reverse word) (reverse words)))
-                        for first = t then nil
-                        for string = (map 'string 'identity chars)
-                        collect (if first string (read-from-string string))))))
+        for c across csv-line
+        if (char= c #\,) collect (reverse word) into words and do (setf word nil)
+          else do (push c word)
+        finally
+           (return 
+             (loop for chars in (reverse (cons (reverse word) (reverse words)))
+                   for first = t then nil
+                   for string = (map 'string 'identity chars)
+                   collect (if first string (read-from-string string))))))
 
 (defun join-paths (&rest path-parts)
   "Joins elements of PATH-PARTS into a file path, inserting slashes where necessary."
@@ -1376,6 +1378,14 @@
          (inputs (normalize-list (read-png file)))
          (outputs (gethash label (label->expected-outputs environment))))
     (list inputs outputs)))
+
+(defun infer-png-file (environment-id file)
+  (let ((environment (environment-by-id environment-id)))
+    (outputs->label
+     environment
+     (infer-frame
+      (net environment)
+      (normalize-list (read-png file))))))
 
 (defun png-file->pixels (file &key 
                                 (target-width 28) 
@@ -1541,19 +1551,6 @@ the given width and height.
        finally (return (cons (getf (fitness environment) :percent)
                              (value (tail (training-error environment))))))))
   
-(defun shuffle (seq net)
-  "Return a sequence with the same elements as the given sequence S, but in random order (shuffled)."
-  (loop
-     with l = (length seq) 
-     with w = (make-array l :initial-contents seq)
-     for i from 0 below l 
-     for r = (random l (rstate net))
-     for h = (aref w i)
-     do 
-       (setf (aref w i) (aref w r)) 
-       (setf (aref w r) h)
-     finally (return (if (listp seq) (map 'list 'identity w) w))))
-
 (defun choose-from-vector (vector n)
   (loop with h = (make-hash-table :test 'equal)
      and l = (length vector)

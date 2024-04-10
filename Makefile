@@ -4,6 +4,7 @@ LISP=/usr/bin/sbcl
 REPORTER=list
 test:
 	$(LISP) --eval "(ql:quickload :prove)" \
+	  --eval "(ql:quickload :swank)" \
 	  --eval "(require :prove)" \
 	  --eval "(prove:run #P\"$(TESTS_FILE)\" :reporter :$(REPORTER))" \
 	  --non-interactive
