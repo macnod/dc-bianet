@@ -1,6 +1,6 @@
 ;;;; dc-bianet.asd
 
-(ql:quickload '(:cl-cpus :zpng :png-read :vgplot :cl-ppcre :vecto))
+(ql:quickload '(:cl-cpus :zpng :png-read :vgplot :cl-ppcre :vecto :transducers))
 (asdf:defsystem #:dc-bianet
   :description "Flexible multilayer backprop neural network simulation."
   :author "Donnie Cameron <macnod@gmail.com>"
@@ -14,7 +14,11 @@
                :cl-ppcre
                :vecto
                :dc-eclectic
-               :dc-ds)
+               :dc-ds
+               :transducers)
   :serial t
   :components ((:file "dc-bianet-package")
-               (:file "dc-bianet")))
+               (:file "dc-bianet")
+               (:file "files")
+               (:file "pngs")
+               (:file "labels")))

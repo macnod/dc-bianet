@@ -12,4 +12,5 @@
         :dc-eclectic
         :dc-ds
         :vecto)
+  (:local-nicknames (:t :transducers))
   (:shadow :range))

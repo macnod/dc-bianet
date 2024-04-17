@@ -1,5 +1,14 @@
 (in-package :dc-bianet)
 
+;; TODO:
+;;
+;;   - Ensure that the create-environment function's
+;;     project-directory and train-path parameters can be specified
+;;     without trailing slashes.
+;;   
+;;   - infer-frames doesn't really operate on frames
+;;     
+
 (defparameter *magnitude-limit* 1e9)
 (defparameter *precision-limit* 1e-9)
 (defparameter *default-learning-rate* 0.02)
@@ -269,46 +278,156 @@
 (defmethod reset-random-state ((net t-net))
   (setf (rstate net) (make-random-state)))
 
-(defclass t-environment ()
-  ((id :accessor id :initarg :id :type keyword)
-   (net :accessor net :initarg :net :type t-net)
-   (training-file :accessor training-file
-                  :initarg :training-file
-                  :type string)
-   (test-file :accessor test-file
-              :initarg :test-file
-              :type string)
-   (training-set :accessor training-set
-                 :initarg :training-set
-                 :initform (vector)
-                 :type vector)
-   (test-set :accessor test-set
-             :initarg :test-set
-             :initform nil
-             :type list)
-   (label->index :accessor label->index
-                 :initarg :label->index
-                 :type hashtable)
-   (label->expected-outputs :accessor label->expected-outputs
-                            :initarg :label->expected-outputs
-                            :type hashtable)
-   (index->label :accessor index->label
-                 :initarg :index->label
-                 :type vector)
-   (training-error :accessor training-error
-                   :type dlist
-                   :initform (make-instance 'dlist))
-   (training-error-limit :accessor training-error-limit
-                         :type integer
-                         :initarg :training-error-limit
-                         :initform 1000)
-   (plot-errors :accessor plot-errors
-                :initarg :plot-errors
-                :initform nil)
-   (fitness :accessor fitness :type list :initform nil)))
-                
+(defclass environment ()
+  ((id
+    :accessor id :initarg :id :type keyword :documentation
+    "The ID of the environment. Allows you, for example, to reference the
+environment using the ENVIRONMENT-BY-ID function.")
+   (net 
+    :accessor net :initarg :net :type t-net :documentation
+    "The neural network associated with this environment.")
+   (project-directory 
+    :accessor project-directory :initarg :project-directory
+    :type (or pathname string) :documentation
+    "The top-level directory where the neural network's training and test
+data is found. This directory can contain CSV files (train.csv and
+test.csv, for example) or it can contain a project directory tree. See
+the files module for more information about the project directory
+structure.")
+   (train-path
+    :accessor train-path :initarg :train-path :initform "train"
+    :type (or pathname string) :documentation
+    "Training data.  This can be a CSV file name, such as train.csv, which
+resides in PROJECT-DIRECTORY. Or, it can be a data-set directory (also
+in PROJECT-DIRECTORY). For information about the structure of a
+data-set directory, see the file module.")
+   (test-path
+    :accessor test-path :initarg :test-path :initform "test"
+    :type (or pathname string) :documentation
+    "Testing data.  This can be a CSV file name, such as test.csv, which
+resides in PROJECT-DIRECTORY. Or, it can be a data-set directory (also
+in PROJECT-DIRECTORY). For information about the structure of a
+data-set directory, see the file module.")
+   (output-labels
+    :accessor output-labels :initarg :output-labels :type t-output-labels
+    :documentation
+    "Information about the labels that required to create the training
+ and testing data, as well as for inference. See the labels module for
+ more information about labels.")
+   (training-set
+    :accessor training-set :initarg :training-set :initform (vector) 
+    :type vector :documentation
+    "A sample set, which is a frames vector. A frame is a list containing 2
+lists that, together, represent a training or testing example for the
+neural network.  Here's the structure:
 
-(defmethod add-training-error ((environment t-environment)
+    (vector                             <-- sample set
+      (list inputs expected-outputs))   <-- frame
+      (list inputs expected-outputs))   <-- frame
+      ⋮                                      ⋮
+    )
+
+The inputs list contains floating-point values that represent the
+input. The length of the inputs list corresponds exactly to the number
+of inputs in the neural network.
+
+The expected-outputs list contains zeros (0.0), except for one value,
+which is 1.0. The index of that exception corresponds to the index of
+the output that we want the the neural network to activate with the
+given inputs.")
+   (test-set 
+    :accessor test-set :initarg :test-set :initform nil :type list
+    :documentation
+    "The structure of this data is exactly like the structure of the
+training-set data, except that this data is to determine the accuracy
+of the neural network after it has been trained.")
+   (training-error 
+    :accessor training-error :type dlist :initform (make-instance 'dlist)
+    :documentation
+    "Contains the network error values, so that they can be graphed during
+and after training. Each element of this dlist consists of the
+following values: elapsed-time, presentation-number, and network
+error. Elapsed time is the number of seconds since training began.
+Presentation number is the the number of times the neural network has
+seen an example from the training set.  If there are 10 examples total
+in the training set, and the neural network has seen each 10 times,
+then presentation-number will be 100.")
+   (training-error-limit
+    :accessor training-error-limit :type integer :initarg :training-error-limit
+    :initform 5000 :documentation
+    "The number of network error values to keep in TRAINING-ERROR. When the
+environment reaches this number of values, the oldest values fall off
+the list.")
+   (plot-errors
+    :accessor plot-errors :initarg :plot-errors :initform nil :documentation
+    "A boolean value that, when true, indicates that the environment should
+plot network error during training.")
+   (fitness
+    :accessor fitness :type list :initform nil :documentation
+    "A percentage value indicating the fitness of the neural network after
+training.  This value is calculated by performing inference against
+TEST-SET and then comparing the inference results against the expected
+outputs for each example. A fitness of 100% indicates that the neural
+network is infallible against the test set, which usually indicates a
+problem.")))
+
+(defun create-png-environment
+    (id
+     project-directory
+     &key 
+       (image-width 28)
+       (image-height 28)
+       (hidden-layer-topology '(16))
+       (train-path "train")
+       (test-path "test")
+       (make-current t)
+       (cx-mode :full)
+       (cx-params 12)
+       (learning-rate *default-learning-rate*)
+       (momentum *default-momentum*))
+  (ensure-data-paths-exist project-directory train-path test-path)
+  (let* ((train-path-abs (join-paths project-directory train-path))
+         (test-path-abs (join-paths project-directory test-path))
+         (output-labels (make-instance 'output-labels 
+                                       :data-set-path train-path-abs))
+         (transformation (lambda (f)
+                           (png-to-inputs f image-width image-height)))
+         (training-set (create-sample-set 
+                        train-path-abs
+                        (label-outputs output-labels)
+                        transformation))
+         (test-set (create-sample-set (join-paths project-directory test-path)
+                                      (label-outputs output-labels)
+                                      transformation))
+         (topology (create-topology hidden-layer-topology training-set))
+         (net (create-standard-net
+               topology
+               :id id
+               :cx-mode cx-mode
+               :cx-params cx-params
+               :learning-rate learning-rate
+               :momentum momentum))
+         (environment (make-instance 'environment
+                                     :id id
+                                     :net net
+                                     :project-directory project-directory
+                                     :train-path train-path
+                                     :test-path test-path
+                                     :output-labels output-labels
+                                     :training-set training-set
+                                     :test-set test-set
+                                     :plot-errors t)))
+    (setf (getf *environments* id) environment)
+    (when make-current (set-current-environment id))
+    environment))
+
+(defun create-topology (hidden-layer-topology training-set)
+  (flatten
+   (list (length (car (elt training-set 0)))
+         hidden-layer-topology
+         (length (second (elt training-set 0))))))
+
+(defmethod add-training-error ((environment environment)
                                (elapsed-seconds integer)
                                (presentation integer)
                                (network-error float))
@@ -318,7 +437,7 @@
            (training-error-limit environment))
     (pop-head (training-error environment))))
 
-(defmethod plot-training-error ((environment t-environment))
+(defmethod plot-training-error ((environment environment))
   (loop for node = (head (training-error environment)) then (next node)
      while node
      for (elapsed presentation network-error) = (value node)
@@ -344,7 +463,6 @@
      collect (len (value layer-node))))
 
 (defgeneric feedforward (thing)
-
   (:method ((net t-net))
     (loop
        for layer-node = (head (layer-dlist net)) then (next layer-node)
@@ -356,7 +474,6 @@
          (feedforward (value layer-node))
          (send-message *job-queue* (list :open-gate layer-gate-index))
          (wait-on-gate layer-gate)))
-
   (:method ((layer dlist))
     (loop 
        for neuron-node = (head layer) then (next neuron-node)
@@ -365,13 +482,11 @@
                         (list :fire
                               (let ((neuron (value neuron-node)))
                                 (lambda () (feedforward neuron)))))))
-  
   (:method ((neuron t-neuron))
     (loop initially (transfer neuron)
        for cx-node = (head (cx-dlist neuron)) then (next cx-node)
        while cx-node
        do (feedforward (value cx-node))))
-
   (:method ((cx t-cx))
     (let ((target-input-impact (* (weight cx) (output (source cx))))
           (target-neuron (target cx)))
@@ -379,7 +494,6 @@
         (incf (input target-neuron) target-input-impact)))))
 
 (defgeneric backpropagate (thing)
-
   (:method ((net t-net))
     (loop
        for layer-node = (tail (layer-dlist net)) then (prev layer-node)
@@ -391,7 +505,6 @@
          (backpropagate (value layer-node))
          (send-message *job-queue* (list :open-gate layer-gate-index))
          (wait-on-gate layer-gate)))
-
   (:method ((layer dlist))
     (loop
        for neuron-node = (tail layer) then (prev neuron-node)
@@ -400,7 +513,6 @@
                         (list :backprop
                               (let ((neuron (value neuron-node)))
                                 (lambda () (backpropagate neuron)))))))
-  
   (:method ((neuron t-neuron))
     (compute-neuron-error neuron)
     (adjust-neuron-cx-weights neuron)))
@@ -582,52 +694,35 @@
   (loop 
     initially (reset-random-state net)
     with global-index = 0 
-     and global-count = (length (collect-weights net))
-     for layer-node = (head (layer-dlist net)) then (next layer-node)
-     while layer-node
-     for layer = (value layer-node)
-     do (loop with layer-index = 0 
-           and layer-count = (length (collect-weights layer))
-           for neuron-node = (head layer) then (next neuron-node)
-           while neuron-node
-           for neuron = (value neuron-node)
-           do (loop with neuron-count = (length (collect-weights neuron))
-                 for cx-node = (head (cx-dlist neuron)) then (next cx-node)
-                 while cx-node
-                 for cx = (value cx-node)
-                 for neuron-index = 0 then (1+ neuron-index)
-                 for weight = (funcall (initial-weight-function net)
-                                       :rstate (rstate net)
-                                       :global-index global-index
-                                       :global-fraction (/ (float global-index)
-                                                           (float global-count))
-                                       :layer-fraction (/ (float layer-index)
-                                                          (float layer-count))
-                                       :neuron-fraction (/ (float neuron-index)
-                                                           (float neuron-count)))
-                 do (with-mutex ((weight-mtx cx))
-                      (setf (weight cx) weight)
-                      (setf (delta cx) 0.0))
-                   (incf global-index)
-                   (incf layer-index)))))
-
-(defun reset-neuron-weights (net neuron)
-  (loop with neuron-count = (length (collect-weights neuron))
-     for cx-node = (head (cx-dlist neuron)) then (next cx-node)
-     while cx-node
-     for cx = (value cx-node)
-     for neuron-index = 0 then (1+ neuron-index)
-     for weight = (the single-float 
-                       (funcall (initial-weight-function net)
-                                :rstate (rstate net)
-                                :global-index neuron-index
-                                :global-fraction 0.0
-                                :layer-fraction 0.0
-                                :neuron-fraction (/ (float neuron-index)
-                                                    (float neuron-count))))
-     do (with-mutex ((weight-mtx cx))
-          (setf (weight cx) weight)
-          (setf (delta cx) (the single-float 0.0)))))
+    and global-count = (length (collect-weights net))
+    for layer-node = (head (layer-dlist net)) then (next layer-node)
+    while layer-node
+    for layer = (value layer-node)
+    do (loop 
+         with layer-index = 0 
+         and layer-count = (length (collect-weights layer))
+         for neuron-node = (head layer) then (next neuron-node)
+         while neuron-node
+         for neuron = (value neuron-node)
+         do (loop with neuron-count = (length (collect-weights neuron))
+                  for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+                  while cx-node
+                  for cx = (value cx-node)
+                  for neuron-index = 0 then (1+ neuron-index)
+                  for weight = (funcall (initial-weight-function net)
+                                        :rstate (rstate net)
+                                        :global-index global-index
+                                        :global-fraction (/ (float global-index)
+                                                            (float global-count))
+                                        :layer-fraction (/ (float layer-index)
+                                                           (float layer-count))
+                                        :neuron-fraction (/ (float neuron-index)
+                                                            (float neuron-count)))
+                      do (with-mutex ((weight-mtx cx))
+                           (setf (weight cx) weight)
+                           (setf (delta cx) 0.0))
+                         (incf global-index)
+                         (incf layer-index)))))
 
 (defgeneric collect-cxs (thing)
   (:method ((net t-net))
@@ -672,25 +767,101 @@
        for cx = (value cx-node)
        do (format t "    ~,4f -> ~a~%" (weight cx) (name (target cx))))))
 
-(defmethod infer-frame ((net t-net) (inputs list))
+(defun infer (net inputs &key (thread-count *default-thread-count*))
+  "NET is a neural network, an object of type T-NET. INPUTS is a list of
+input values, each consisting of a floating-point number. The length
+of INPUTS must match the number of neurons in the input layer of
+NET. This function performs a feed-forward pass of the inputs through
+NET and returns a list of output values, each consisting of a
+floating-point number. The number of output values will match the
+number of neurons in the output layer of NET.
+
+If there's an active thread pool (*thread-pool* is not empty), this
+function will use that thread pool. Otherwise, this function will
+create a thread pool with THREAD-COUNT threads, use the new thread
+pool, then stop it."
   (let ((own-threads (not *thread-pool*)))
-    (when own-threads (start-thread-pool *default-thread-count*))
+    (when own-threads (start-thread-pool thread-count))
     (apply-inputs net inputs)
     (feedforward net)
     (when own-threads (stop-thread-pool))
     (collect-outputs net)))
 
-(defmethod train-frame ((net t-net) (inputs list) (expected-outputs list))
-  (let ((own-threads (not *thread-pool*)))
-    (when own-threads (start-thread-pool *default-thread-count*))
-    (let* ((outputs (infer-frame net inputs))
-           (frame-error (loop for actual in outputs
-                           for expected in expected-outputs
-                           summing (expt (- expected actual) 2))))
+(defun frame-error (outputs expected-outputs)
+  "OUTPUTS is a list of floating-point numbers, each representing the
+output of a neuron. EXPECTED-OUTPUTS is a list of floating-point
+numbers, each representing the expected output of a neuron. This
+function returns the frame error, which is the sum of the squared
+differences between the outputs and the expected outputs."
+  (loop 
+    for actual-output in outputs
+    for expected-output in expected-outputs
+    sum (expt (- expected-output actual-output) 2)))
+
+(defun train-frame (net frame &key (thread-count *default-thread-count*))
+  "NET is a neural network, an object of type T-NET. FRAME is a list with
+2 elements: a list of input values and a list of expected output
+values. Each value is a floating-point number. The length of the input
+list must match the number of neurons in the input layer of NET, and
+the length of the output list must match the number of neurons in the
+output layer of NET. This function performs a feed-forward pass of the
+inputs through NET, then a back-propagation pass of the error between
+the actual outputs and the expected output values, and returns the
+network error, which is a single floating-point value representing a
+measure of the error of the output layer.
+
+If there's an active thread pool (*thread-pool* is not empty), this
+function will use that thread pool. Otherwise, this function will
+create a thread pool with THREAD-COUNT threads, use the new thread
+pool, then stop it."
+  (let ((own-threads (not *thread-pool*))
+        (inputs (first frame))
+        (expected-outputs (second frame)))
+    (when own-threads (start-thread-pool thread-count))
+    (let* ((outputs (infer net inputs))
+           (frame-error (frame-error outputs expected-outputs)))
       (apply-expected-outputs net expected-outputs)
       (backpropagate net)
       (when own-threads (stop-thread-pool))
       frame-error)))
+
+;; (defun train-bad-frame (net
+;;                         frame
+;;                         target-error
+;;                         &key (max-iterations 1)
+;;                              (thread-count *default-thread-count*))
+;;   "This function repeatedly trains the neural network on FRAME
+;; until the network error for the input reaches TARGET-ERROR or until
+;; the training iterations exceed MAX-ITERATIONS.
+
+;; NET, is a neural network, an object of type T-NET. FRAME is a list
+;; with 2 elements: a list of input values and a list of expected output
+;; values. Each value is a floating-point number. The length of the input
+;; list must match the number of neurons in the input layer of NET, and
+;; the length of the output list must match the number of neurons in the
+;; output layer of NET. TARGET-ERROR is a floating-point number that
+;; tells the function to stop training when the network error is less
+;; than or equal to this value. MAX-ITERATIONS is an integer that tells
+;; the function to stop training when the number of iterations exceeds
+;; this value. This function performs a feed-forward pass of the inputs
+;; through NET, then a back-propagation pass of the error between the
+;; actual outputs and the expected output values, and returns network
+;; error for the frame."
+;;   (let ((own-threads (not *thread-pool*)))
+;;     (loop 
+;;       initially (when own-threads (start-thread-pool thread-count))
+;;       with inputs = (first frame)
+;;       with expected-outputs = (second frame)
+;;       for iteration = 0 then (1+ iteration)
+;;       for outputs = (infer net inputs)
+;;       for frame-error = (frame-error outputs expected-outputs)
+;;       while (and (< iteration max-iterations)
+;;                  (<= frame-error target-error))
+;;       do
+;;          (apply-expected-outputs net expected-outputs)
+;;          (backpropagate net)
+;;       finally (when own-threads (stop-thread-pool))
+;;               (return frame-error))))
 
 (defmethod train-bad-frame ((net t-net)
                             (inputs list)
@@ -698,7 +869,7 @@
                             (target-error float))
   (let ((own-threads (not *thread-pool*)))
     (when own-threads (start-thread-pool *default-thread-count*))
-    (let* ((outputs (infer-frame net inputs))
+    (let* ((outputs (infer net inputs))
            (frame-error (loop for actual in outputs
                            for expected in expected-outputs
                            summing (expt (- expected actual) 2))))
@@ -724,7 +895,7 @@
   (with-mutex (*training-in-progress-mutex*)
     *main-training-thread*))
 
-(defmethod train-frames ((environment t-environment)
+(defmethod train-frames ((environment environment)
                          (training-frames vector)
                          (when-complete function)
                          &key
@@ -732,8 +903,7 @@
                            (target-error 0.05)
                            (reset-weights t)
                            (report-function #'default-report-function)
-                           (report-frequency 10)
-                           (skip-refresh t))
+                           (report-frequency 10))
   (when (get-training-in-progress)
     (error "Training is already in progress."))
   (with-open-file (stream (log-file (net environment))
@@ -750,8 +920,7 @@
                                        epochs 
                                        target-error 
                                        report-function 
-                                       report-frequency
-                                       skip-refresh)))
+                                       report-frequency)))
         (funcall when-complete
                  (id environment)
                  (getf result :presentations)
@@ -759,64 +928,72 @@
                  (getf result :network-error))))
     :name "main-training-thread")))
 
-(defmethod train-frames-work ((environment t-environment)
+(defmethod train-frames-work ((environment environment)
                               (training-frames vector)
                               (epochs integer)
                               (target-error float)
                               (report-function function)
-                              (report-frequency integer)
-                              (skip-refresh t))
-  (loop initially 
-       (setf *continue-training* t)
-     with net = (net environment)
-     and start-time = (get-universal-time)
-     and presentation = 0
-     and last-presentation = 0
-     and sample-size = (length training-frames)
-     with last-report-time = start-time
-     with frame-errors = (make-array sample-size 
-                                     :element-type 'float 
-                                     :initial-element 1.0)
-     for indexes = (shuffle (loop for a from 0 below sample-size collect a)
-                            (rstate net))
-     for epoch from 1 to epochs
-     for network-error = (average frame-errors)
-     while (and
-            (if skip-refresh
-                (> network-error target-error)
-                (or (> network-error target-error)
-                    (> (refresh-frame-errors net training-frames frame-errors)
-                       target-error)))
-            *continue-training*)
-     do (loop 
-           for index in indexes
-           for (inputs expected-outputs) = (aref training-frames index)
-           for count = 1 then (1+ count)
-           for elapsed-seconds = (- (get-universal-time) start-time)
-           for since-last-report = (- (get-universal-time) last-report-time)
-           for frame-error = (aref frame-errors index)
-           while *continue-training*
-           when (> frame-error target-error)
-           do
-             (incf presentation)
-             (setf (aref frame-errors index)
-                   (train-bad-frame net inputs expected-outputs target-error))
-           when (>= since-last-report report-frequency)
-           do
-             (funcall report-function
-                      environment
-                      epoch count presentation last-presentation
-                      elapsed-seconds since-last-report
-                      (average frame-errors))
-             (setf last-report-time (get-universal-time))
-             (setf last-presentation presentation))
-     finally (return (list :presentations presentation
-                           :start-time start-time 
-                           :network-error network-error))))
+                              (report-frequency integer))
+  (loop
+    initially (setf *continue-training* t)
+    with net = (net environment)
+    and start-time = (get-universal-time)
+    and presentation = 0
+    and last-presentation = 0
+    and sample-size = (length training-frames)
+    with last-report-time = start-time
+    for epoch from 1 to epochs
+    for network-error = (loop
+                          for index in (shuffle 
+                                        (loop for a from 0 below sample-size
+                                              collect a)
+                                        (rstate net))
+                          for count = 0 then (1+ count)
+                          for frame = (aref training-frames index)
+                          for (inputs expected-outputs) = frame
+                          for outputs = (progn 
+                                          (incf presentation)
+                                          (infer net inputs))
+                          for frame-error = (frame-error 
+                                             outputs expected-outputs)
+                          for network-error = frame-error 
+                            then (+ network-error frame-error)
+                          when (> frame-error target-error)
+                            do (apply-expected-outputs net expected-outputs)
+                               (backpropagate net)
+                          when (>= (- (get-universal-time) last-report-time)
+                                   report-frequency)
+                            do (funcall report-function
+                                        environment
+                                        epoch
+                                        count
+                                        presentation
+                                        last-presentation
+                                        (- (get-universal-time) start-time)
+                                        (- (get-universal-time) last-report-time)
+                                        (/ network-error count))
+                               (setf last-report-time (get-universal-time))
+                               (setf last-presentation presentation)
+                          finally (return (/ network-error sample-size)))
+    while (> network-error target-error)
+    when (> (- (get-universal-time) last-report-time) report-frequency)
+      do (funcall report-function
+                  environment
+                  epoch 
+                  presentation last-presentation
+                  (- (get-universal-time) start-time)
+                  (- (get-universal-time) last-report-time)
+               network-error)
+         (setf last-report-time (get-universal-time))
+         (setf last-presentation presentation)
+    finally (return (list :presentations presentation
+                          :start-time start-time 
+                          :network-error network-error))))
+            
 
-(defun average (v)
-  (loop for a across v summing a into total counting a into count
-     finally (return (/ total count))))
+(defun vector-average (v)
+  (loop for a across v summing a into total
+     finally (return (/ total (length v)))))
 
 (defun stop-training (id)
   (let ((log-file (log-file (net (getf *environments* id)))))
@@ -875,93 +1052,19 @@
                            presentation last-presentation 
                            elapsed-seconds since-last-report 
                            network-error))
-
-(defgeneric normalize-set (set)
-  (:method ((set list))
-    (loop with max-value = (loop for frame in set
-                              for inputs = (car frame)
-                              maximizing (loop for input in inputs 
-                                            maximizing input))
-       with min-value = (loop for frame in set
-                           for inputs = (car frame)
-                           minimizing (loop for input in inputs
-                                         minimizing input))
-       with range = (float (- max-value min-value))
-       for frame in set
-       for input-values = (car frame)
-       for expected-outputs = (second frame)
-       collect 
-         (list
-          (loop for input-value in input-values 
-             for new-value = (/ (- input-value min-value) range)
-             collect new-value)
-          expected-outputs)))
-  (:method ((set array))
-    (normalize-set (map 'list 'identity set))))
-
-
-(defun hash-table-to-plist (hash-table)
-  (loop for k being the hash-keys in hash-table using (hash-value v)
-       collect (list k v)))
-
-(defun type-1-file->set (filename label->expected-outputs)
-  (let* ((line-count (file-line-count filename))
-         (set (make-array line-count :element-type 'list :initial-element nil)))
-    (with-open-file (file filename)
-      (loop for line = (read-line file nil)
-         for index = 0 then (1+ index)
-         while (and line (> (length line) 1))
-         for values = (type-1-csv-line->label-and-inputs line)
-         for label = (car values)
-         for inputs = (cdr values)
-         for expected-outputs = (gethash label label->expected-outputs)
-         do (setf (aref set index) (list inputs expected-outputs))))
-    set))
          
-(defun label-outputs-hash (label-index)
-  (loop with label-outputs = (make-hash-table :test 'equal)
-     for label being the hash-keys in label-index using (hash-value index)
-     do (setf (gethash label label-outputs)
-              (label->outputs label label-index))
-     finally (return label-outputs)))
-
 (defun label->outputs (label label-indexes)
   (loop with index = (gethash label label-indexes)
      for a from 0 below (hash-table-count label-indexes)
      collect (if (= a index) 1.0 0.0)))
 
 (defun outputs->label (environment outputs)
-  (elt (index->label environment) (index-of-max outputs)))
-         
-(defun label-counts->label-indexes (label-counts)
-  (loop with label-indexes = (make-hash-table :test 'equal)
-     for label in (sort (loop for label being the hash-keys in label-counts
-                           collect label)
-                        #'string<)
-     for index = 0 then (1+ index)
-     do (setf (gethash label label-indexes) index)
-     finally (return label-indexes)))
-
-(defun labels->label-indexes (list)
-  (loop with label-indexes = (make-hash-table :test 'equal)
-     for label in (sort list #'string<)
-     for index = 0 then (1+ index)
-     do (setf (gethash label label-indexes) index)
-     finally (return label-indexes)))
+  (elt (index->label environment) (index-of-max outputs)))         
 
 (defun label-indexes->index-labels (label-indexes)
   (loop with index-labels = (make-hash-table)
      for label being the hash-keys in label-indexes using (hash-value index)
      do (setf (gethash index index-labels) label)))
-
-(defun type-1-file->label-counts (filename)
-  (let ((label-counts (make-hash-table :test 'equal)))
-    (with-open-file (file filename)
-      (loop for line = (read-line file nil)
-         while line
-         for label = (subseq line 0 (search "," line))
-         do (incf (gethash label label-counts 0))))
-    label-counts))
 
 (defgeneric evaluate-inference-1hs (net training-frames)
   (:method ((net t-net) (training-frames list))
@@ -970,7 +1073,7 @@
        for (inputs expected-outputs) in training-frames
        for index = 0 then (1+ index)
        for expected-winner = (index-of-max expected-outputs)
-       for outputs = (infer-frame net inputs)
+       for outputs = (infer net inputs)
        for winner = (index-of-max outputs)
        for total = 1 then (1+ total)
        for pass = (= winner expected-winner)
@@ -989,11 +1092,9 @@
   (:method ((net t-net) (frames list))
     (loop 
        for (inputs expected-outputs) in frames
-       for outputs = (infer-frame net inputs)
+       for outputs = (infer net inputs)
        for frame-count = 1 then (1+ frame-count)
-       for frame-error = (loop for actual in outputs
-                            for expected in expected-outputs
-                            summing (expt (- expected actual) 2))
+       for frame-error = (frame-error outputs expected-outputs)
        summing frame-error into total-error
        finally (return (setf *network-error* (/ total-error frame-count)))))
   (:method ((net t-net) (frames vector))
@@ -1013,16 +1114,14 @@
 
 (defmethod refresh-frame-errors ((net t-net) (frames vector) (frame-errors vector))
   (loop for (inputs expected-outputs) across frames
-     for outputs = (infer-frame net inputs)
+     for outputs = (infer net inputs)
      for index = 0 then (1+ index)
-     for frame-error = (loop for actual in outputs
-                          for expected in expected-outputs
-                          summing (expt (- expected actual) 2))
+     for frame-error = (frame-error outputs expected-outputs)
      do (setf (aref frame-errors index) frame-error)
-     finally (return (average frame-errors))))
+     finally (return (vector-average frame-errors))))
 
-(defmethod infer ((net t-net) (frames list))
-  (loop for frame in frames collect (infer-frame net frame)))
+(defmethod infer-list ((net t-net) (frames list))
+  (loop for frame in frames collect (infer net frame)))
 
 (defun create-layer (count &key add-bias (transfer-key :logistic))
   (when (< count 1) (error "Count must be greater than or equal to 1"))
@@ -1279,83 +1378,17 @@
                    for string = (map 'string 'identity chars)
                    collect (if first string (read-from-string string))))))
 
-(defun join-paths (&rest path-parts)
-  "Joins elements of PATH-PARTS into a file path, inserting slashes where necessary."
-  (format nil "~a~{~a~^/~}"
-          (if (scan "^/" (car path-parts)) "/" "")
-          (loop for part in path-parts
-             for first = t then nil
-             for clean-part = (if (scan "//+$" part)
-                                  (subseq part 0 (1- (length part)))
-                                  (regex-replace-all "^/+|/+$" part ""))
-             unless (or (null clean-part)
-                        (zerop (length clean-part)))
-             collect clean-part)))
-
-(defun create-environment
-    (id
-     &key 
-       (topology '(784 16 2))
-       (home-folder (join-paths (namestring (user-homedir-pathname))
-                                "common-lisp" "dc-bianet"))
-       (test-file "mnist-0-1-test.csv")
-       (training-file "mnist-0-1-train.csv")
-       (make-current t)
-       (cx-mode :full)
-       (cx-params 12)
-       (learning-rate *default-learning-rate*)
-       (momentum *default-momentum*))
-  (let* ((training-file-name (join-paths home-folder training-file))
-         (test-file-name (join-paths home-folder test-file))
-         (label-counts (type-1-file->label-counts training-file-name))
-         (label->index (label-counts->label-indexes label-counts))
-         (label->expected-outputs (label-outputs-hash label->index))
-         (index->label (loop for label being the hash-keys in label->index
-                          collect label into list
-                          finally
-                            (return
-                              (map 'vector 'identity
-                                   (sort list
-                                         (lambda (a b)
-                                           (< (gethash a label->index)
-                                              (gethash b label->index))))))))
-         (training-set (file->training-set training-file-name
-                                           label->expected-outputs))
-         (test-set (file->test-set test-file-name
-                                   label->expected-outputs))
-         (net (create-standard-net
-               topology
-               :id id
-               :cx-mode cx-mode
-               :cx-params cx-params
-               :learning-rate learning-rate
-               :momentum momentum))
-         (environment (make-instance 't-environment
-                                     :id id
-                                     :net net
-                                     :training-file training-file-name
-                                     :test-file test-file-name
-                                     :training-set training-set
-                                     :test-set test-set
-                                     :label->index label->index
-                                     :label->expected-outputs label->expected-outputs
-                                     :index->label index->label)))
-    (setf (getf *environments* id) environment)
-    (when make-current (set-current-environment id))
-    environment))
-
-;; (defun create-environment-from-pngs
-;;     (id
-;;      &key
-;;        (png-folder (error "png-folder parameter is required."))
-;;        hidden-layers
-;;   (let* ((training-file-name (join-paths png-folder
-;;                                          (format nil "~(~a~)-train.lisp" id)))
-;;          (test-file-name (join-paths png-folder
-;;                                      (format nil "~(~a~)-test.lisp" id)))
-;;          (output-labels (relative-subdirectories-of png-folder))
-;;          (input-count (length (read-png (any-png-in png-folder)))))
-         
+(defun ensure-data-paths-exist (project-directory train-path test-path)
+  (case (path-type project-directory)
+    (:not-found (error "project-directory not found: ~a" project-directory))
+    (:file (error "project-directory is a file: ~a" project-directory)))
+  (let ((path (join-paths project-directory train-path)))
+    (when (eql (path-type path) :not-found)
+      (error "train-path not found: ~a" path)))
+  (when test-path
+    (let ((path (join-paths project-directory test-path)))
+      (when (eql (path-type path) :not-found)
+        (error "test-path not found: ~a" path)))))
 
 (defun update-training-set (id)
   (let* ((env (environment-by-id id))
@@ -1375,17 +1408,9 @@
 
 (defun png-file->frame (id label file)
   (let* ((environment (environment-by-id id))
-         (inputs (normalize-list (read-png file)))
+         (inputs (normalize-list (read-png file) :min 0 :max 255))
          (outputs (gethash label (label->expected-outputs environment))))
     (list inputs outputs)))
-
-(defun infer-png-file (environment-id file)
-  (let ((environment (environment-by-id environment-id)))
-    (outputs->label
-     environment
-     (infer-frame
-      (net environment)
-      (normalize-list (read-png file))))))
 
 (defun png-file->pixels (file &key 
                                 (target-width 28) 
@@ -1439,23 +1464,6 @@ the given width and height.
                               collect (loop for x from 0 below target-width
                                             collect (aref target-array x y))))))
 
-(defun pixels->png-file (intensities file &key (width 280) (height 280))
-  (with-canvas (:width width :height height)
-    (loop with iw = (length (car intensities)) and ih = (length intensities)
-          with dx = (/ (float width) (float iw))
-          and dy = (/ (float height) (float ih))
-          initially (set-line-width 0)
-                    (format t "~a" (list :dx dx :dy dy))
-          for row in intensities
-          for y = 0.0 then (+ y dy)
-          do (loop for i in row
-                   for x = 0.0 then (+ x dx)
-                   do
-                      (set-rgb-fill i i i)
-                      (rectangle (truncate x) (truncate y) (truncate (+ x dx)) (truncate (+ y dy)))
-                      (fill-path))
-          finally (save-png file))))
-        
 (defun drop-environment (id)
   (remf *environments* id)
   (when (and *environment* (equal (id *environment*) id))
@@ -1476,7 +1484,7 @@ the given width and height.
                    :training-set (length (training-set environment))
                    :test-set (length (test-set environment)))))
 
-(defun train (id &key
+(defun train (environment-id &key
                    (epochs 100)
                    (target-error 0.05)
                    (reset-weights t)
@@ -1484,12 +1492,11 @@ the given width and height.
                    (report-function #'plotting-report-function)
                    (report-frequency 10)
                    plot-errors
-                   weights-file
-                   skip-refresh)
-  (let ((environment (getf *environments* id)))
-    (when (not environment) (error "No such environment ~(~a~)" id))
+                   weights-file)
+  (let ((environment (getf *environments* environment-id)))
+    (when (not environment) (error "No such environment ~(~a~)" environment-id))
     (unless (directory-exists-p (path-only (log-file *net*)))
-      (create-directory (path-only (log-file *net*))))
+      (ensure-directories-exist (path-only (log-file *net*))))
     (when (or reset-weights (not weights-file))
       (clear (training-error environment)))
     (when weights-file
@@ -1498,7 +1505,7 @@ the given width and height.
     (setf (plot-errors environment) plot-errors)
     (when (plot-errors environment)
       (title (format nil "~(~a~) ~{~a~^-~} Training Error"
-                     id (simple-topology (net environment))))
+                     environment-id (simple-topology (net environment))))
       (axis (list t t 0 1.0)))
     (ensure-directories-exist *log-folder*)
     (start-thread-pool thread-count)
@@ -1509,8 +1516,7 @@ the given width and height.
                   :target-error target-error
                   :reset-weights reset-weights
                   :report-frequency report-frequency
-                  :report-function report-function
-                  :skip-refresh skip-refresh))
+                  :report-function report-function))
   :training)
 
 (defun set-current-environment (id)
@@ -1567,25 +1573,6 @@ the given width and height.
 (defun environment-by-id (id)
   (getf *environments* id))
 
-(defun read-png (filename &key (width 28) (height 28))
-  (loop with image-data = (png-read:image-data
-                           (png-read:read-png-file filename))
-     with dimensions = (length (array-dimensions image-data))
-     for y from 0 below height appending
-       (loop for x from 0 below width collecting
-            (if (= dimensions 2)
-                (aref image-data x y)
-                (aref image-data x y 0)))
-     into intensity-list
-     finally (return (invert-intensity intensity-list))))
-
-(defun invert-intensity (list &key (max 255))
-  (loop for element in list collect (- max element)))
-
-(defun normalize-list (list &key (max 255) (min 0))
-  (loop with range = (- max min)
-     for element in list collect (float (+ (/ element range) min))))
-
 (defun inputs->png (inputs filename)
   (loop with png = (make-instance 'png
                                   :color-type :grayscale
@@ -1606,10 +1593,6 @@ the given width and height.
       (loop for a from 1 to count do
            (format out "~a,~{~a~^,~}~%" label inputs)))
     (when update-training-set (update-training-set id))))
-
-(defun denormalize-list (inputs &key (min 0) (max 255))
-  (loop with size = (- max min)
-     for input in inputs collect (truncate (+ (* input size) min))))
 
 (defun training-set->pngs (id path &key label count)
   (loop with environment = (environment-by-id id)
@@ -1633,8 +1616,8 @@ the given width and height.
   (declare (ignore environment))
   (loop with dir-spec = (format nil "~a-*.png" (join-paths path prefix))
      for file in (directory dir-spec)
-     for normalized-file-data = (normalize-list (read-png file))
-     for outputs = (infer-frame *net* normalized-file-data)
+     for normalized-file-data = (normalize-list (read-png file) :min 0 :max 255)
+     for outputs = (infer *net* normalized-file-data)
      for label = (outputs->label *environment* outputs)
      collect (list (file-namestring file) label)))
 
@@ -1644,18 +1627,8 @@ the given width and height.
      with frame = (png-file->frame :digits label file)
      with inputs = (car frame)
      with expected-outputs = (second frame)
-     for a from 1 to count do 
-       (train-frame net inputs expected-outputs)
-     finally (return (outputs->label environment (infer-frame net inputs)))))
-
-(defun relative-subdirectories-of (path)
-  (loop with dir-spec = (format nil "~a~a*" path (if (scan "/$" path) "" "/"))
-     for subdirectory in (directory dir-spec)
-     when (uiop:directory-pathname-p subdirectory)
-     collect (let* ((path (directory-namestring subdirectory)))
-               (pathname-name (subseq path 0 (1- (length path)))))
-     into relative-subdirectories
-     finally (return (sort relative-subdirectories #'string<))))
+     for a from 1 to count do (train-frame net frame)
+     finally (return (outputs->label environment (infer net inputs)))))
 
 (defun list->key-index (string-list)
   (loop with key-index = (make-hash-table :test 'equal)
@@ -1674,39 +1647,15 @@ the given width and height.
     (map 'vector 'identity keys)))
        
 (defun pngs->frames-for-label (label-folder expected-outputs &key as-vector)
-  (loop with dir-spec = (format nil "~a/*.png" label-folder)
-     for file in (directory dir-spec)
-     for inputs = (normalize-list (read-png file))
-     collect (list inputs expected-outputs) into frames
-     finally (return (if as-vector
-                         (map 'vector 'identity frames)
-                         frames))))
+  (loop 
+    with dir-spec = (format nil "~a/*.png" label-folder)
+    for file in (directory dir-spec)
+    for inputs = (normalize-list (read-png file) :min 0 :max 255)
+    collect (list inputs expected-outputs) into frames
+    finally (return (if as-vector
+                        (map 'vector 'identity frames)
+                        frames))))
 
-(defun pngs->frames (png-tree-path &key as-vector)
-  (loop with labels = (relative-subdirectories-of png-tree-path)
-     with label->index = (list->key-index labels)
-     with label->expected-outputs = (label-outputs-hash label->index)
-     for label in labels
-     for label-folder = (join-paths png-tree-path label)
-     for expected-outputs = (gethash label label->expected-outputs)
-     appending (pngs->frames-for-label label-folder expected-outputs)
-     into frames
-     finally (return (if as-vector
-                         (map 'vector 'identity frames)
-                         frames))))
-
-(defun any-png-in (png-tree-path)
-  (let* ((output-labels (relative-subdirectories-of png-tree-path))
-         (dir-spec (join-paths png-tree-path (car output-labels) "*.png"))
-         (files (directory dir-spec)))
-    (car files)))
-
-(defun pngs->suggest-topology (png-tree-path)
-  (loop with output-count = (length (relative-subdirectories-of png-tree-path))
-     with input-count = (length (read-png (any-png-in png-tree-path)))
-     for power = 1 then (1+ power)
-     while (< (expt 2 power) output-count)
-     finally (return (list input-count (expt 2 (1+ power)) output-count))))
 
 ;; (defun evaluate-topologies (&key
 ;;                               (id :zero-or-one)

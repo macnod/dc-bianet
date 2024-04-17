@@ -1,4 +1,4 @@
-TESTS_FILE="$(HOME)/common-lisp/dc-bianet/dc-bianet-tests.lisp"
+TESTS_FILE="$(HOME)/common-lisp/dc-bianet/test/dc-bianet-tests.lisp"
 LISP=/usr/bin/sbcl
 # Reporter can be list dot tap or fiveam.
 REPORTER=list
