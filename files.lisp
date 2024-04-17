@@ -98,7 +98,7 @@ quotes."
    (t:comp
     (t:filter (lambda (s) (not (zerop (length s)))))
     (t:map (lambda (s)
-             (string-trim 
+             (string-trim
               "\""
               (format nil "~a"
                       (read-from-string
@@ -112,9 +112,9 @@ quotes."
 in directories that are direct children of DIRECTORY."
   (loop
     for name in (subdirectory-names directory)
-    summing (length 
-             (uiop:directory-files 
-              (ensure-directory-string 
+    summing (length
+             (uiop:directory-files
+              (ensure-directory-string
                (join-paths directory name))))))
 
 (defun data-set-files (directory)
@@ -128,7 +128,7 @@ description of a data-set directory."
     with label-files = (make-hash-table :test 'equal)
     for label in (subdirectory-names directory)
     do (setf (gethash label label-files)
-             (uiop:directory-files 
+             (uiop:directory-files
               (ensure-directory-string (join-paths directory label))))
     finally (return label-files)))
 
@@ -187,7 +187,7 @@ complete. Typically, these examples go in the data-set directory
 \"test\"."
   (loop
     with source-directory = (ensure-directory-string
-                             (join-paths 
+                             (join-paths
                               project-directory source-subdirectory))
     and target-directory = (ensure-directory-string
                             (join-paths project-directory target-subdirectory))
@@ -290,7 +290,7 @@ performance and accuracy of the inferences. Use this function to
 evaluate the accuracy of a neural network against a training or
 testing data set. This function is not for performing inferences on
 new, unlabeled data."
-  (loop 
+  (loop
     with label = (path-tail label-directory)
     and label-files = (uiop:directory-files
                        (ensure-directory-string label-directory))
@@ -300,16 +300,20 @@ new, unlabeled data."
     for correct = (string= label inferred-label)
     for correct-count = (if correct 1 0)
     then (+ correct-count (if correct 1 0))
-    when correct do (incf correct-count)
     collect (list :file (file-namestring file)
                   :label (funcall inference-function file)
                   :correct correct)
       into inferred-labels
-    finally 
-       (return 
+    finally
+       (return
+         (let ((accuracy (* 100 (/ (float correct-count)
+                                   (float file-count)))))
          (list :actual-label label
-               :accuracy (format nil "~3,f%" (/ correct-count file-count))
-               :inferred-labels inferred-labels))))
+               :accuracy (format
+                          nil
+                          (if (> accuracy 97) "~,3f%" "~d%")
+                          accuracy)
+               :inferred-labels inferred-labels)))))
 
 (defun csv-label-sample-size (csv-file)
   "Picks the first element of each row in the file at CSV-FILE, forcing
@@ -320,12 +324,12 @@ value.
 For performance reasons, this function does not support the CSV format
 completely. That first element may not contain commas, even inside of
 quotes."
-  (hashify-list 
+  (hashify-list
    (t:transduce
     (t:comp
      (t:filter (lambda (s) (not (zerop (length s)))))
      (t:map (lambda (s)
-              (string-trim 
+              (string-trim
                "\""
                (format nil "~a"
                        (read-from-string
@@ -348,7 +352,7 @@ quotes."
 (defun label-sample-size (data-set-directory)
   "Returns a hash table where each key is a label in DATA-SET-DIRECTORY
 and each value is the the count of files in that label's directory."
-  (loop 
+  (loop
     with h = (make-hash-table :test 'equal)
     for label in (subdirectory-names data-set-directory)
     for samples = (uiop:directory-files
@@ -363,7 +367,7 @@ SAMPLE-SET. For normalization, the lowest and highest input values
 across all vector elements is identified first, then in a second pass,
 the data is normalized."
   (loop
-    with min-max = (loop 
+    with min-max = (loop
                      for frame across sample-set
                      for inputs = (car frame)
                      for frame-minmax = (loop for input across inputs
@@ -380,18 +384,18 @@ the data is normalized."
     and min-value = (car min-max)
     for frame across sample-set
     for input-values = (car frame)
-    do (loop 
+    do (loop
          for value in input-values
          collect (/ (- value min-value) range) into normalized
          finally (setf (car frame) normalized))))
 
-(defun create-sample-set (data-set-path 
+(defun create-sample-set (data-set-path
                           label-outputs
                           file-transformation)
   (case (path-type data-set-path)
     (:file (create-sample-set-from-file data-set-path label-outputs))
-    (:directory (create-sample-set-from-directory data-set-path 
-                                                  label-outputs 
+    (:directory (create-sample-set-from-directory data-set-path
+                                                  label-outputs
                                                   file-transformation))
     (:t (error "File not found: ~a" data-set-path))))
 
@@ -402,7 +406,7 @@ correctly or in the same way that an real CSV parser would. For
 example, this function doesn't care if the commas are inside of a
 quoted value. However, this function is much faster than, a standard
 parser, because it does significantly less work."
-  (loop 
+  (loop
     for start = 0 then (1+ end)
     for end = (position #\, line :start start)
     while end
@@ -457,8 +461,8 @@ equal to the hash-table count of LABEL-OUTPUTS."
     do (setf (aref sample-set i) (list inputs outputs))
     finally (return sample-set)))
 
-(defun create-sample-set-from-directory (data-set-path 
-                                         label-outputs 
+(defun create-sample-set-from-directory (data-set-path
+                                         label-outputs
                                          file-transformation)
   "Creates and returns a neural network sample set.  A sample set is a
 vector of lists, where each list contains a list of input values and a
@@ -491,7 +495,7 @@ that the neural network can use as input. The function should
 normalize the values to be between 0.0 and 1.0."
   (loop
     with label-files = (data-set-files data-set-path)
-    with total-file-count = (loop 
+    with total-file-count = (loop
                               for label being the hash-keys in label-files
                                 using (hash-value files)
                               summing (length files))
@@ -505,6 +509,9 @@ normalize the values to be between 0.0 and 1.0."
     do (loop
          for file in files
          for inputs = (funcall file-transformation file)
-         do (setf (aref sample-set index) (list inputs outputs))
+         do (setf (aref sample-set index)
+                  (list inputs
+                        outputs
+                        (format nil "~a/~a" label (pathname-name file))))
             (incf index))
     finally (return sample-set)))

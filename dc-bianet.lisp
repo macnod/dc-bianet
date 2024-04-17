@@ -5,9 +5,9 @@
 ;;   - Ensure that the create-environment function's
 ;;     project-directory and train-path parameters can be specified
 ;;     without trailing slashes.
-;;   
+;;
 ;;   - infer-frames doesn't really operate on frames
-;;     
+;;
 
 (defparameter *magnitude-limit* 1e9)
 (defparameter *precision-limit* 1e-9)
@@ -44,14 +44,14 @@
 (defparameter *training-set* nil)
 (defparameter *test-set* nil)
 
-(ensure-directories-exist (format nil "~a~a" 
+(ensure-directories-exist (format nil "~a~a"
                                   *log-folder*
                                   (if (ppcre:scan "/$" *log-folder*) "" "/")))
 
 (defun start-swank-server ()
-  (loop for potential-port = 4005 then (1+ potential-port) 
+  (loop for potential-port = 4005 then (1+ potential-port)
      for tries from 1 to 5
-     for port = (handler-case 
+     for port = (handler-case
 		    (swank:create-server :port potential-port :dont-close t)
 		  (sb-bsd-sockets:socket-error () nil))
      until port
@@ -66,7 +66,7 @@
 (defun thread-work ()
   (loop for (k v) = (receive-message *job-queue*)
      do (case k
-          ((:fire :backprop) 
+          ((:fire :backprop)
            (funcall v)
            (inc-job-count))
           (:open-gate
@@ -84,13 +84,13 @@
 
 (defun stop-thread-pool ()
   (when *thread-pool*
-    (loop 
+    (loop
        for (k v) in (receive-pending-messages *job-queue*)
-       when (equal k :open-gate) 
+       when (equal k :open-gate)
        do (send-message *job-queue* (list k v)))
     (loop for thread in *thread-pool*
        do (send-message *job-queue* '(:stop nil)))
-    (loop for thread in *thread-pool* 
+    (loop for thread in *thread-pool*
        when (thread-alive-p thread)
        do (join-thread thread))
     (receive-pending-messages *job-queue*)
@@ -127,7 +127,7 @@
              neuron-fraction)
     (declare (ignore rstate global-index global-fraction neuron-fraction))
     (+ min (* layer-fraction (- max min)))))
-  
+
 (defun make-sinusoid-weight-fn (&key (min -0.5) (max 0.5))
   (declare (single-float min max))
   (lambda (&key rstate
@@ -176,8 +176,8 @@
 (defun relu-derivative (x)
   (declare (single-float x)
            (optimize (speed 3) (safety 0)))
-  (if (<= x (the single-float 0.0)) 
-      (the single-float 0.0) 
+  (if (<= x (the single-float 0.0))
+      (the single-float 0.0)
       (the single-float 1.0)))
 
 (defun relu-leaky (x)
@@ -187,11 +187,11 @@
 
 (defun relu-leaky-derivative (x)
   (if (<= x (the single-float 0.0))
-      (the single-float 0.001) 
+      (the single-float 0.001)
       (the single-float 1.0)))
-                              
-(defparameter *transfer-functions* 
-  (list :logistic (list :function #'logistic 
+
+(defparameter *transfer-functions*
+  (list :logistic (list :function #'logistic
                         :derivative #'logistic-derivative)
         :relu (list :function #'relu
                     :derivative #'relu-derivative)
@@ -207,11 +207,11 @@
    (target :reader target :initarg :target :type t-neuron
            :initform (error ":target required"))
    (weight :accessor weight :initarg :weight :initform 0.1 :type single-float)
-   (weight-dlist :accessor weight-dlist :type dlist 
+   (weight-dlist :accessor weight-dlist :type dlist
                  :initform (make-instance 'dlist))
-   (learning-rate :accessor learning-rate :initarg :learning-rate 
+   (learning-rate :accessor learning-rate :initarg :learning-rate
                   :type single-float :initform 0.02)
-   (momentum :accessor momentum :initarg :momentum :type single-float 
+   (momentum :accessor momentum :initarg :momentum :type single-float
              :initform 0.1)
    (delta :accessor delta :initarg :delta :type single-float :initform 0.0)
    (weight-mtx :reader weight-mtx :initform (make-mutex))))
@@ -221,7 +221,7 @@
    (name :accessor name :initarg :name :type string :initform "")
    (input :accessor input :type single-float :initform 0.0)
    (biased :accessor biased :initarg :biased :type boolean :initform nil)
-   (transfer-key :accessor transfer-key :initarg :transfer-key 
+   (transfer-key :accessor transfer-key :initarg :transfer-key
                  :initform :logistic)
    (transfer-function :accessor transfer-function :type function)
    (transfer-derivative :accessor transfer-derivative :type function)
@@ -266,7 +266,7 @@
    (log-file :accessor log-file :initarg :log-file :initform nil)
    (weights-file :accessor weights-file :initarg :weights-file :initform nil)
    (rstate :accessor rstate :initform (make-random-state))
-   (initial-weight-function 
+   (initial-weight-function
     :accessor initial-weight-function
     :initarg :initial-weight-function
     :initform (make-progressive-weight-fn :min -0.5 :max 0.5))
@@ -278,15 +278,49 @@
 (defmethod reset-random-state ((net t-net))
   (setf (rstate net) (make-random-state)))
 
+(defgeneric delete-neuron (net neuron)
+  (:method ((net t-net) (neuron t-neuron))
+    (let ((cx-nodes (loop
+                      for cx-node = (head (cx-dlist neuron))
+                        then (next cx-node)
+                      while cx-node
+                      when (eql (id (target (value cx-node))) (id neuron))
+                        collect cx-node)))
+      (loop
+        for cx-node in cx-nodes
+        do (delete-node (cx-dlist neuron) cx-node))
+      (loop
+        for layer-node = (head (layer-dlist net)) then (next layer-node)
+        while layer-node
+        for layer = (value layer-node)
+        for layer-index = 1 then (1+ layer-index)
+        for neuron-node = (loop
+                            for node = (head layer) then (next node)
+                            while node
+                            when (eql (id (value node)) (id neuron))
+                              do (return node))
+        when neuron-node
+          do (delete-node layer neuron-node)
+             (return (let* ((neuron (value neuron-node))
+                            (name (name neuron))
+                            (id (id neuron)))
+                       (list :name name
+                             :id id
+                             :layer layer-index
+                             :neuron neuron))))))
+  (:method ((net t-net) (neuron t))
+    (when neuron
+      (error "Invalid type for neuron parameter"))))
+
 (defclass environment ()
   ((id
     :accessor id :initarg :id :type keyword :documentation
     "The ID of the environment. Allows you, for example, to reference the
 environment using the ENVIRONMENT-BY-ID function.")
-   (net 
+   (net
     :accessor net :initarg :net :type t-net :documentation
     "The neural network associated with this environment.")
-   (project-directory 
+   (project-directory
     :accessor project-directory :initarg :project-directory
     :type (or pathname string) :documentation
     "The top-level directory where the neural network's training and test
@@ -315,7 +349,7 @@ data-set directory, see the file module.")
  and testing data, as well as for inference. See the labels module for
  more information about labels.")
    (training-set
-    :accessor training-set :initarg :training-set :initform (vector) 
+    :accessor training-set :initarg :training-set :initform (vector)
     :type vector :documentation
     "A sample set, which is a frames vector. A frame is a list containing 2
 lists that, together, represent a training or testing example for the
@@ -335,13 +369,13 @@ The expected-outputs list contains zeros (0.0), except for one value,
 which is 1.0. The index of that exception corresponds to the index of
 the output that we want the the neural network to activate with the
 given inputs.")
-   (test-set 
+   (test-set
     :accessor test-set :initarg :test-set :initform nil :type list
     :documentation
     "The structure of this data is exactly like the structure of the
 training-set data, except that this data is to determine the accuracy
 of the neural network after it has been trained.")
-   (training-error 
+   (training-error
     :accessor training-error :type dlist :initform (make-instance 'dlist)
     :documentation
     "Contains the network error values, so that they can be graphed during
@@ -374,7 +408,7 @@ problem.")))
 (defun create-png-environment
     (id
      project-directory
-     &key 
+     &key
        (image-width 28)
        (image-height 28)
        (hidden-layer-topology '(16))
@@ -388,11 +422,11 @@ problem.")))
   (ensure-data-paths-exist project-directory train-path test-path)
   (let* ((train-path-abs (join-paths project-directory train-path))
          (test-path-abs (join-paths project-directory test-path))
-         (output-labels (make-instance 'output-labels 
+         (output-labels (make-instance 'output-labels
                                        :data-set-path train-path-abs))
          (transformation (lambda (f)
                            (png-to-inputs f image-width image-height)))
-         (training-set (create-sample-set 
+         (training-set (create-sample-set
                         train-path-abs
                         (label-outputs output-labels)
                         transformation))
@@ -426,6 +460,54 @@ problem.")))
    (list (length (car (elt training-set 0)))
          hidden-layer-topology
          (length (second (elt training-set 0))))))
+
+(defun failing-frames (environment-id
+                       &key
+                         set
+                         (thread-count *default-thread-count*))
+  (loop
+    with environment = (environment-by-id environment-id)
+    with frame-set = (or set (test-set environment))
+    and label-vector = (label-vector (output-labels environment))
+    and net = (net environment)
+          initially (start-thread-pool thread-count)
+    for (inputs expected-outputs info) across frame-set
+    for outputs = (infer net inputs)
+    for label = (outputs-label label-vector outputs)
+    for expected-label = (outputs-label label-vector expected-outputs)
+    unless (string= label expected-label)
+      collect (list :info info
+                    :label label
+                    :expected-label expected-label
+                    :outputs outputs
+                    :expected-outputs expected-outputs)
+        into failed-tests
+    finally
+       (stop-thread-pool)
+       (return failed-tests)))
+
+(defun infer-frame (environment-id
+                    frame-index
+                    &key
+                      set
+                      (thread-count *default-thread-count*))
+  (let* ((environment (environment-by-id environment-id))
+         (net (net environment))
+         (set (or set (test-set environment)))
+         (frame (aref set frame-index))
+         (inputs (car frame))
+         (expected-outputs (second frame))
+         (info (third frame))
+         (label-vector (label-vector (output-labels environment)))
+         (expected-label (outputs-label label-vector expected-outputs))
+         (outputs (infer net inputs :thread-count thread-count))
+         (label (outputs-label label-vector outputs)))
+    (list :correct (string= label expected-label)
+          :label label
+          :expected-label expected-label
+          :info info
+          :outputs outputs
+          :expected-outputs expected-outputs)))
 
 (defmethod add-training-error ((environment environment)
                                (elapsed-seconds integer)
@@ -469,16 +551,16 @@ problem.")))
        while layer-node
        for layer-gate-index = 0 then (1+ layer-gate-index)
        for layer-gate = (elt *gates* layer-gate-index)
-       do 
+       do
          (close-gate layer-gate)
          (feedforward (value layer-node))
          (send-message *job-queue* (list :open-gate layer-gate-index))
          (wait-on-gate layer-gate)))
   (:method ((layer dlist))
-    (loop 
+    (loop
        for neuron-node = (head layer) then (next neuron-node)
        while neuron-node
-       do (send-message *job-queue* 
+       do (send-message *job-queue*
                         (list :fire
                               (let ((neuron (value neuron-node)))
                                 (lambda () (feedforward neuron)))))))
@@ -508,8 +590,8 @@ problem.")))
   (:method ((layer dlist))
     (loop
        for neuron-node = (tail layer) then (prev neuron-node)
-       while neuron-node 
-       do (send-message *job-queue* 
+       while neuron-node
+       do (send-message *job-queue*
                         (list :backprop
                               (let ((neuron (value neuron-node)))
                                 (lambda () (backpropagate neuron)))))))
@@ -521,21 +603,21 @@ problem.")))
   (let ((err (if (zerop (len (cx-dlist neuron)))
                  ;; This is an output neuron (no outgoing connections)
                  (- (expected-output neuron) (output neuron))
-                 ;; This is an input-layer or hidden-layer neuron;  we need 
+                 ;; This is an input-layer or hidden-layer neuron;  we need
                  ;; to use the errors of downstream neurons to compute the
                  ;; error of this neuron
                  (loop
                     for cx-node = (head (cx-dlist neuron)) then (next cx-node)
                     while cx-node
                     for cx = (value cx-node)
-                    summing (the single-float 
+                    summing (the single-float
                                  (* (the single-float (weight cx))
                                     (the single-float (err-derivative (target cx)))))))))
     (with-mutex ((err-mtx neuron)) (setf (err neuron) err))
     (with-mutex ((err-der-mtx neuron))
       (setf (err-derivative neuron)
             (* (the single-float err)
-               (the single-float (funcall (transfer-derivative neuron) 
+               (the single-float (funcall (transfer-derivative neuron)
                                           (output neuron))))))))
 
 (defmethod adjust-neuron-cx-weights ((neuron t-neuron))
@@ -646,19 +728,19 @@ problem.")))
     (loop for cx-node = (head (cx-dlist neuron)) then (next cx-node)
           while cx-node
           collect (value cx-node))))
-  
+
 (defgeneric collect-weights (thing)
   (:method ((net t-net))
     (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
        for layer-index = 1 then (1+ layer-index)
        while layer-node
-       for layer = (value layer-node) 
+       for layer = (value layer-node)
        append (collect-weights layer)))
   (:method ((layer dlist))
     (loop for neuron-node = (head layer) then (next neuron-node)
        for neuron-index = 1 then (1+ neuron-index)
        while neuron-node
-       for neuron = (value neuron-node) 
+       for neuron = (value neuron-node)
        append (collect-weights neuron)))
   (:method ((neuron t-neuron))
     (loop for cx-node = (head (cx-dlist neuron)) then (next cx-node)
@@ -691,15 +773,15 @@ problem.")))
        do (setf (weight cx) weight))))
 
 (defun reset-weights (net)
-  (loop 
+  (loop
     initially (reset-random-state net)
-    with global-index = 0 
+    with global-index = 0
     and global-count = (length (collect-weights net))
     for layer-node = (head (layer-dlist net)) then (next layer-node)
     while layer-node
     for layer = (value layer-node)
-    do (loop 
-         with layer-index = 0 
+    do (loop
+         with layer-index = 0
          and layer-count = (length (collect-weights layer))
          for neuron-node = (head layer) then (next neuron-node)
          while neuron-node
@@ -724,27 +806,13 @@ problem.")))
                          (incf global-index)
                          (incf layer-index)))))
 
-(defgeneric collect-cxs (thing)
-  (:method ((net t-net))
-    (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
-       while layer-node
-       append (collect-cxs (value layer-node))))
-  (:method ((layer dlist))
-    (loop for neuron-node = (head layer) then (next neuron-node)
-       while neuron-node
-       append (collect-cxs (value neuron-node))))
-  (:method ((neuron t-neuron))
-    (loop for cx-node = (head (cx-dlist neuron)) then (next cx-node)
-       while cx-node
-       collect (value cx-node))))
-
 (defgeneric render-as-text (thing)
   (:method ((net t-net))
     (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
        for layer-index = 1 then (1+ layer-index)
        while layer-node
        for layer = (value layer-node)
-       do 
+       do
          (format t "Layer ~d~%" layer-index)
          (render-as-text layer)))
   (:method ((layer dlist))
@@ -752,8 +820,8 @@ problem.")))
        while neuron-node
        for neuron = (value neuron-node)
        do
-         (format t "  Neuron ~a ~(~a~) i=~,4f; o=~,4f; eo=~,4f; e=~,4f; ed=~,4f~%" 
-                 (name neuron) 
+         (format t "  Neuron ~a ~(~a~) i=~,4f; o=~,4f; eo=~,4f; e=~,4f; ed=~,4f~%"
+                 (name neuron)
                  (transfer-key neuron)
                  (input neuron)
                  (output neuron)
@@ -793,7 +861,7 @@ output of a neuron. EXPECTED-OUTPUTS is a list of floating-point
 numbers, each representing the expected output of a neuron. This
 function returns the frame error, which is the sum of the squared
 differences between the outputs and the expected outputs."
-  (loop 
+  (loop
     for actual-output in outputs
     for expected-output in expected-outputs
     sum (expt (- expected-output actual-output) 2)))
@@ -848,7 +916,7 @@ pool, then stop it."
 ;; actual outputs and the expected output values, and returns network
 ;; error for the frame."
 ;;   (let ((own-threads (not *thread-pool*)))
-;;     (loop 
+;;     (loop
 ;;       initially (when own-threads (start-thread-pool thread-count))
 ;;       with inputs = (first frame)
 ;;       with expected-outputs = (second frame)
@@ -917,14 +985,14 @@ pool, then stop it."
       (when reset-weights (reset-weights (net environment)))
       (let ((result (train-frames-work environment
                                        training-frames
-                                       epochs 
-                                       target-error 
-                                       report-function 
+                                       epochs
+                                       target-error
+                                       report-function
                                        report-frequency)))
         (funcall when-complete
                  (id environment)
                  (getf result :presentations)
-                 (getf result :start-time) 
+                 (getf result :start-time)
                  (getf result :network-error))))
     :name "main-training-thread")))
 
@@ -944,20 +1012,20 @@ pool, then stop it."
     with last-report-time = start-time
     for epoch from 1 to epochs
     for network-error = (loop
-                          for index in (shuffle 
+                          for index in (shuffle
                                         (loop for a from 0 below sample-size
                                               collect a)
                                         (rstate net))
                           for count = 0 then (1+ count)
                           for frame = (aref training-frames index)
                           for (inputs expected-outputs) = frame
-                          for outputs = (progn 
+                          for outputs = (progn
                                           (incf presentation)
                                           (infer net inputs))
-                          for frame-error = (frame-error 
+                          for frame-error = (frame-error
                                              outputs expected-outputs)
-                          for network-error = frame-error 
-                            then (+ network-error frame-error)
+                          for network-error = frame-error
+                          then (+ network-error frame-error)
                           when (> frame-error target-error)
                             do (apply-expected-outputs net expected-outputs)
                                (backpropagate net)
@@ -979,7 +1047,7 @@ pool, then stop it."
     when (> (- (get-universal-time) last-report-time) report-frequency)
       do (funcall report-function
                   environment
-                  epoch 
+                  epoch
                   presentation last-presentation
                   (- (get-universal-time) start-time)
                   (- (get-universal-time) last-report-time)
@@ -987,9 +1055,9 @@ pool, then stop it."
          (setf last-report-time (get-universal-time))
          (setf last-presentation presentation)
     finally (return (list :presentations presentation
-                          :start-time start-time 
+                          :start-time start-time
                           :network-error network-error))))
-            
+
 
 (defun vector-average (v)
   (loop for a across v summing a into total
@@ -1021,25 +1089,25 @@ pool, then stop it."
                     (if (> l 100) 100 l)
                     100))))))
 
-(defun default-report-function (environment iteration count 
-                                presentation last-presentation 
-                                elapsed-seconds since-last-report 
+(defun default-report-function (environment iteration count
+                                presentation last-presentation
+                                elapsed-seconds since-last-report
                                 network-error)
   (let ((rate (if (zerop since-last-report)
                   0
                   (/ (- presentation last-presentation) since-last-report)))
         (filename (log-file (net environment))))
     (with-open-file (log-stream filename
-                                :direction :output 
-                                :if-exists :append 
+                                :direction :output
+                                :if-exists :append
                                 :if-does-not-exist :create)
-      (format log-stream "t=~ds; i=~d; v=~d; p=~d; r=~fp/s; e=~d~%" 
+      (format log-stream "t=~ds; i=~d; v=~d; p=~d; r=~fp/s; e=~d~%"
               elapsed-seconds iteration count presentation rate
               network-error))))
 
-(defun plotting-report-function (environment iteration count 
-                                 presentation last-presentation 
-                                 elapsed-seconds since-last-report 
+(defun plotting-report-function (environment iteration count
+                                 presentation last-presentation
+                                 elapsed-seconds since-last-report
                                  network-error)
   (add-training-error environment
                       elapsed-seconds
@@ -1048,18 +1116,18 @@ pool, then stop it."
   (when (and (plot-errors environment)
              (> (len (training-error environment)) 1))
     (plot-training-error environment))
-  (default-report-function environment iteration count 
-                           presentation last-presentation 
-                           elapsed-seconds since-last-report 
+  (default-report-function environment iteration count
+                           presentation last-presentation
+                           elapsed-seconds since-last-report
                            network-error))
-         
+
 (defun label->outputs (label label-indexes)
   (loop with index = (gethash label label-indexes)
      for a from 0 below (hash-table-count label-indexes)
      collect (if (= a index) 1.0 0.0)))
 
 (defun outputs->label (environment outputs)
-  (elt (index->label environment) (index-of-max outputs)))         
+  (elt (index->label environment) (index-of-max outputs)))
 
 (defun label-indexes->index-labels (label-indexes)
   (loop with index-labels = (make-hash-table)
@@ -1078,19 +1146,19 @@ pool, then stop it."
        for total = 1 then (1+ total)
        for pass = (= winner expected-winner)
        for correct = (if pass 1 0) then (if pass (1+ correct) correct)
-       finally 
+       finally
          (when own-threads (stop-thread-pool))
-         (return (list :percent 
+         (return (list :percent
                        (float (* 100 (/ correct total)))
-                       :total total 
-                       :pass correct 
+                       :total total
+                       :pass correct
                        :fail (- total correct)))))
   (:method ((net t-net) (training-frames vector))
     (evaluate-inference-1hs net (map 'list 'identity training-frames))))
-  
+
 (defgeneric network-error (net frames)
   (:method ((net t-net) (frames list))
-    (loop 
+    (loop
        for (inputs expected-outputs) in frames
        for outputs = (infer net inputs)
        for frame-count = 1 then (1+ frame-count)
@@ -1132,8 +1200,8 @@ pool, then stop it."
      and n = (+ count (if add-bias 1 0))
      for a from 1 to n
      for transfer = (getf *transfer-functions* transfer-key)
-     for neuron = (make-instance 
-                   't-neuron 
+     for neuron = (make-instance
+                   't-neuron
                    :id (bianet-id)
                    :biased (and add-bias (= a n))
                    :transfer-key transfer-key)
@@ -1149,24 +1217,25 @@ pool, then stop it."
                      (error ":neurons parameter required"))
      for add-bias = (getf layer-spec :add-bias)
      for transfer-key = (getf layer-spec :transfer-key :logistic)
-     for layer = (create-layer count 
-                               :add-bias add-bias 
+     for layer = (create-layer count
+                               :add-bias add-bias
                                :transfer-key transfer-key)
      do (push-tail (layer-dlist net) layer)
-     finally 
+     finally
        (name-neurons net)
        (return net)))
 
-(defun create-standard-net (succinct-topology 
-                            &key 
+(defun create-standard-net (succinct-topology
+                            &key
                               (transfer-function :relu)
                               (id (bianet-id))
-                              (weight-reset-function 
+                              (weight-reset-function
                                (make-sinusoid-weight-fn :min -0.5 :max 0.5))
                               (momentum *default-momentum*)
                               (learning-rate *default-learning-rate*)
                               (cx-mode :full)
-                              (cx-params 12))
+                              (cx-params 12)
+                              log-file)
   (loop
      with connect-function = (case cx-mode
                                (:full (lambda (net)
@@ -1191,8 +1260,8 @@ pool, then stop it."
      for in-output-layer = (= layer-index last-layer)
      for in-hidden-layer = (and (not in-input-layer) (not in-output-layer))
      for transfer-key = (if in-output-layer :logistic transfer-function)
-     for layer = (create-layer neuron-count 
-                               :add-bias in-hidden-layer 
+     for layer = (create-layer neuron-count
+                               :add-bias in-hidden-layer
                                :transfer-key transfer-key)
      do (push-tail (layer-dlist net) layer)
      finally
@@ -1200,14 +1269,16 @@ pool, then stop it."
        (funcall (connect-function net) net)
        (reset-weights net)
        (create-gates net)
-       (setf (log-file net) (default-log-file-name net))
+       (setf (log-file net) (or log-file (default-log-file-name net)))
+       (ensure-directories-exist (log-file net))
+       (uiop:run-program (format nil "touch ~s" (log-file net)))
        (setf (weights-file net) (default-weights-file-name net))
        (return net)))
-                               
+
 (defmethod create-gates ((net t-net))
-  (setf *gates* 
+  (setf *gates*
         (map 'vector 'identity
-             (loop 
+             (loop
                 for layer-node = (head (layer-dlist net)) then (next layer-node)
                 while layer-node
                 for layer-index = 0 then (1+ layer-index)
@@ -1225,13 +1296,13 @@ pool, then stop it."
            while neuron-node
            for neuron = (value neuron-node)
            do (incf global-index)
-             (setf (name neuron) 
-                   (format nil "~a-~a~a" 
+             (setf (name neuron)
+                   (format nil "~a-~a~a"
                            layer-index
                            neuron-index
                            (if (biased neuron) "b" ""))))))
 
-(defun connect-fully (net &key 
+(defun connect-fully (net &key
                             (learning-rate *default-learning-rate*)
                             (momentum *default-momentum*))
   (loop for layer-node = (head (layer-dlist net)) then (next layer-node)
@@ -1239,23 +1310,23 @@ pool, then stop it."
      for layer = (value layer-node)
      for next-layer = (value (next layer-node))
      do (loop for source-node = (head layer) then (next source-node)
-           while source-node do 
+           while source-node do
              (loop for target-node = (head next-layer) then (next target-node)
                 while target-node
                 for source = (value source-node)
                 for target = (value target-node)
                 when (not (biased target))
                 do
-                  (push-tail 
+                  (push-tail
                    (cx-dlist source)
-                   (make-instance 
-                    't-cx 
-                    :source source 
+                   (make-instance
+                    't-cx
+                    :source source
                     :target target
                     :learning-rate learning-rate
                     :momentum momentum))))))
 
-(defun connect-mostly (net &key 
+(defun connect-mostly (net &key
                              (learning-rate *default-learning-rate*)
                              (momentum *default-momentum*)
                              (skip-modulus 13))
@@ -1265,19 +1336,19 @@ pool, then stop it."
      for layer = (value layer-node)
      for next-layer = (value (next layer-node))
      do (loop for source-node = (head layer) then (next source-node)
-           while source-node do 
+           while source-node do
              (loop for target-node = (head next-layer) then (next target-node)
                 while target-node
                 for source = (value source-node)
                 for target = (value target-node)
                 when (and (not (biased target))
                           (not (zerop (mod (incf index) skip-modulus))))
-                do 
-                  (push-tail 
+                do
+                  (push-tail
                    (cx-dlist source)
-                   (make-instance 
-                    't-cx 
-                    :source source 
+                   (make-instance
+                    't-cx
+                    :source source
                     :target target
                     :learning-rate learning-rate
                     :momentum momentum))))))
@@ -1286,7 +1357,7 @@ pool, then stop it."
                              &key
                                (learning-rate *default-learning-rate*)
                                (momentum *default-momentum*))
-  (let ((neuron (make-instance 't-neuron 
+  (let ((neuron (make-instance 't-neuron
                                :id (bianet-id)
                                :biased nil
                                :transfer-key :relu))
@@ -1294,7 +1365,7 @@ pool, then stop it."
         (prev-layer (value (prev hidden-layer-node)))
         (next-layer (value (next hidden-layer-node))))
     ;; Add neuron to hidden layer
-    (push-tail hidden-layer neuron) 
+    (push-tail hidden-layer neuron)
     ;; Add incoming connections from previous layer
     (add-incoming-cxs net neuron prev-layer
                       :learning-rate learning-rate
@@ -1372,7 +1443,7 @@ pool, then stop it."
         if (char= c #\,) collect (reverse word) into words and do (setf word nil)
           else do (push c word)
         finally
-           (return 
+           (return
              (loop for chars in (reverse (cons (reverse word) (reverse words)))
                    for first = t then nil
                    for string = (map 'string 'identity chars)
@@ -1412,16 +1483,16 @@ pool, then stop it."
          (outputs (gethash label (label->expected-outputs environment))))
     (list inputs outputs)))
 
-(defun png-file->pixels (file &key 
-                                (target-width 28) 
+(defun png-file->pixels (file &key
+                                (target-width 28)
                                 (target-height 28))
   "Read the given PNG file and turns its data into rows of floating
 point values that represent the intensity of each pixel, after the
 image has been converted to black and white.  The intensity is given
 by a floating-point value in the range 1 to 1, where 0 is black and 1
 is white.  The length of the rows corresponds to the width of the
-image represented by the resulting pixels.  The number of rows represents 
-the hight of image represented by the resulting pixels.  That width 
+image represented by the resulting pixels.  The number of rows represents
+the hight of image represented by the resulting pixels.  That width
 and height is given by the target-width and target-height parameters,
 and this function adjusts the image retreived from the file to fit into
 the given width and height.
@@ -1450,13 +1521,13 @@ the given width and height.
                  for intensity = (/ (float
                                      (if (zerop c-max)
                                          (aref image-data x-source-int y-source-int)
-                                         (loop for c from 0 below c-max 
-                                               summing (aref image-data 
+                                         (loop for c from 0 below c-max
+                                               summing (aref image-data
                                                              x-source-int
                                                              y-source-int
                                                              c))))
                                     max-intensity)
-                 do (setf (aref target-array 
+                 do (setf (aref target-array
                                 (truncate x-target)
                                 (truncate y-target))
                              (- 1.0 intensity)))
@@ -1556,7 +1627,7 @@ the given width and height.
     (loop while (get-training-in-progress) do (sleep 1)
        finally (return (cons (getf (fitness environment) :percent)
                              (value (tail (training-error environment))))))))
-  
+
 (defun choose-from-vector (vector n)
   (loop with h = (make-hash-table :test 'equal)
      and l = (length vector)
@@ -1596,7 +1667,7 @@ the given width and height.
 
 (defun training-set->pngs (id path &key label count)
   (loop with environment = (environment-by-id id)
-     for (frame-label inputs) in 
+     for (frame-label inputs) in
        (loop with frame-count = 0
           for frame across (training-set environment)
           for frame-label = (outputs->label environment (second frame))
@@ -1645,9 +1716,9 @@ the given width and height.
                     (lambda (a b) (< (gethash a hash-table)
                                      (gethash b hash-table))))))
     (map 'vector 'identity keys)))
-       
+
 (defun pngs->frames-for-label (label-folder expected-outputs &key as-vector)
-  (loop 
+  (loop
     with dir-spec = (format nil "~a/*.png" label-folder)
     for file in (directory dir-spec)
     for inputs = (normalize-list (read-png file) :min 0 :max 255)
@@ -1738,7 +1809,7 @@ the given width and height.
 ;;   (loop with row-format = "|~{ ~a | ~}"
 ;;      for hidden from hidden-start to hidden-stop by hidden-step
 ;;      for environment = (create-environment
-;;                         id 
+;;                         id
 ;;                         :topology (list inputs hidden outputs)
 ;;                         :training-file training-file
 ;;                         :test-file test-file
@@ -1772,7 +1843,7 @@ the given width and height.
 ;;   (loop with row-format = "|~{ ~a | ~}"
 ;;      for iteration from 1 to iterations
 ;;      for environment = (create-environment
-;;                         id 
+;;                         id
 ;;                         :topology (list inputs hidden-units outputs)
 ;;                         :training-file training-file
 ;;                         :test-file test-file
@@ -1792,6 +1863,3 @@ the given width and height.
 ;;                         "network-error"))
 ;;               lines)
 ;;        (return (format nil "~{~a~%~}" lines))))
-
-                                        
-
