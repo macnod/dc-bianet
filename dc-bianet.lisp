@@ -555,11 +555,11 @@ problem.")))
 (defun plot-xy (label x-list y-list)
   (multiple-value-bind (y-min y-max)
       (min-max y-list)
+    (declare (ignore y-min))
     (format-plot
      *debug*
-     (format nil "set yrange [~,4f : ~,4f]" y-min y-max))
+     (format nil "set yrange [~,4f : ~,4f]" 0.0 y-max))
     (plot x-list y-list label)))
-
 
 (defmethod plot-training-error ((environment environment))
   (loop for node = (head (training-error environment)) then (next node)
