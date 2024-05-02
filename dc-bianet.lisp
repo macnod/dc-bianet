@@ -17,9 +17,9 @@
 (defparameter *default-max-weight* 0.9)
 (defparameter *default-thread-count*
   (let ((count (cl-cpus:get-number-of-processors)))
-    (cond ((< count 3) 1)
-          ((< count 9) (1- count))
-          (t (- count 2)))))
+    (cond ((< count 3) count)
+          ((= count 3) 2)
+          (t (1+ (truncate count 2))))))
 
 (defparameter *job-queue* nil) ;; mailbox
 (defparameter *job-counter* 0)
@@ -312,6 +312,17 @@
     (when neuron
       (error "Invalid type for neuron parameter"))))
 
+(defgeneric delete-cx (net source target)
+  (:method ((net t-net) (source-name string) (target-name string))
+    (loop with neuron = (neuron-by-name net source-name)
+          with cx-dlist = (cx-dlist neuron)
+          for cx-node = (head cx-dlist) then (next cx-node)
+          while cx-node
+          for cx = (value cx-node)
+          when (equal (name (target cx)) target-name)
+            do (let ((cx (delete-node cx-dlist cx-node)))
+                 (return cx)))))
+
 (defclass environment ()
   ((id
     :accessor id :initarg :id :type keyword :documentation
@@ -519,13 +530,44 @@ problem.")))
            (training-error-limit environment))
     (pop-head (training-error environment))))
 
+(defun min-max (list) 
+  (loop for y in list
+        maximizing y into max
+        minimizing y into min
+        finally (return (values min max))))
+
+(defun min-max-avg (list) 
+  (loop for y in list
+        maximizing y into max
+        minimizing y into min
+        summing y into sum
+        counting y into count
+        finally (return (values min max (/ (float sum) count)))))
+
+(defun plot-y (label list)
+  (multiple-value-bind (min max)
+      (min-max list)
+    (format-plot 
+     *debug* 
+     (format nil "set yrange [~,4f : ~,4f]" min max))
+    (plot list label)))
+
+(defun plot-xy (label x-list y-list)
+  (multiple-value-bind (y-min y-max)
+      (min-max y-list)
+    (format-plot
+     *debug*
+     (format nil "set yrange [~,4f : ~,4f]" y-min y-max))
+    (plot x-list y-list label)))
+
+
 (defmethod plot-training-error ((environment environment))
   (loop for node = (head (training-error environment)) then (next node)
      while node
      for (elapsed presentation network-error) = (value node)
      collect elapsed into elapsed-seconds
      collect network-error into network-error-list
-     finally (funcall #'plot elapsed-seconds network-error-list)))
+     finally (plot-xy "error" elapsed-seconds network-error-list)))
 
 (defmethod default-log-file-name ((net t-net))
   (join-paths *log-folder*
@@ -634,6 +676,7 @@ problem.")))
                         (the single-float delta)
                         (the single-float (* (momentum cx) (delta cx))))))
     (with-mutex ((weight-mtx cx))
+      (setf (delta cx) (- new-weight (weight cx)))
       (setf (weight cx) new-weight))))
 
 (defmethod apply-inputs ((net t-net) (input-values list))
@@ -677,6 +720,27 @@ problem.")))
 (defmethod neuron-count ((net t-net))
   (loop for node = (head (layer-dlist net)) then (next node)
         while node summing (len (value node))))
+
+(defmethod neuron-stats ((net t-net) (layer-index integer))
+  (loop for neuron in (collect-neurons (at (layer-dlist net) layer-index))
+        for weights = (collect-weights neuron)
+        collect (multiple-value-bind (min max avg)
+                    (min-max-avg weights)
+                  (list :neuron (name neuron) :min min :max max :avg avg))))
+
+(defmethod cx-stats ((net t-net) (layer-index integer))
+  (loop 
+    for neuron in (collect-neurons (at (layer-dlist net) layer-index))
+    appending
+    (loop 
+      for cx in (collect-cxs neuron)
+      for index = 0 then (1+ index)
+      collect (list :src (name neuron)
+                    :tgt (name (target cx))
+                    :cx index
+                    :w (weight cx)
+                    :d (delta cx)))))
+          
 
 (defun neuron-by-name (structure name)
   (car (remove-if-not (lambda (n) (equal name (name n)))
@@ -893,60 +957,6 @@ pool, then stop it."
       (when own-threads (stop-thread-pool))
       frame-error)))
 
-;; (defun train-bad-frame (net
-;;                         frame
-;;                         target-error
-;;                         &key (max-iterations 1)
-;;                              (thread-count *default-thread-count*))
-;;   "This function repeatedly trains the neural network on FRAME
-;; until the network error for the input reaches TARGET-ERROR or until
-;; the training iterations exceed MAX-ITERATIONS.
-
-;; NET, is a neural network, an object of type T-NET. FRAME is a list
-;; with 2 elements: a list of input values and a list of expected output
-;; values. Each value is a floating-point number. The length of the input
-;; list must match the number of neurons in the input layer of NET, and
-;; the length of the output list must match the number of neurons in the
-;; output layer of NET. TARGET-ERROR is a floating-point number that
-;; tells the function to stop training when the network error is less
-;; than or equal to this value. MAX-ITERATIONS is an integer that tells
-;; the function to stop training when the number of iterations exceeds
-;; this value. This function performs a feed-forward pass of the inputs
-;; through NET, then a back-propagation pass of the error between the
-;; actual outputs and the expected output values, and returns network
-;; error for the frame."
-;;   (let ((own-threads (not *thread-pool*)))
-;;     (loop
-;;       initially (when own-threads (start-thread-pool thread-count))
-;;       with inputs = (first frame)
-;;       with expected-outputs = (second frame)
-;;       for iteration = 0 then (1+ iteration)
-;;       for outputs = (infer net inputs)
-;;       for frame-error = (frame-error outputs expected-outputs)
-;;       while (and (< iteration max-iterations)
-;;                  (<= frame-error target-error))
-;;       do
-;;          (apply-expected-outputs net expected-outputs)
-;;          (backpropagate net)
-;;       finally (when own-threads (stop-thread-pool))
-;;               (return frame-error))))
-
-(defmethod train-bad-frame ((net t-net)
-                            (inputs list)
-                            (expected-outputs list)
-                            (target-error float))
-  (let ((own-threads (not *thread-pool*)))
-    (when own-threads (start-thread-pool *default-thread-count*))
-    (let* ((outputs (infer net inputs))
-           (frame-error (loop for actual in outputs
-                           for expected in expected-outputs
-                           summing (expt (- expected actual) 2))))
-      (when (> frame-error target-error)
-        (apply-expected-outputs net expected-outputs)
-        (backpropagate net))
-      (when own-threads (stop-thread-pool))
-      frame-error)))
-
 (defun set-training-in-progress (thread)
   (if thread
       (with-mutex (*training-in-progress-mutex*)
@@ -971,14 +981,19 @@ pool, then stop it."
                            (target-error 0.05)
                            (reset-weights t)
                            (report-function #'default-report-function)
-                           (report-frequency 10))
+                           (report-frequency 5)
+                           (thread-count *default-thread-count*))
   (when (get-training-in-progress)
     (error "Training is already in progress."))
   (with-open-file (stream (log-file (net environment))
                           :direction :output
                           :if-does-not-exist :create
                           :if-exists :append)
-    (format stream "~%BEGIN~%"))
+    (format stream "~%BEGIN ~a=~,4f; ~a=~a; ~a=~:[nil~;t~]; ~a=~d~%"
+            "target-error" target-error
+            "simple-topology" (simple-topology (net environment))
+            "reset-weights" reset-weights
+            "thread-count" thread-count))
   (set-training-in-progress
    (make-thread
     (lambda ()
@@ -1561,7 +1576,7 @@ the given width and height.
                    (reset-weights t)
                    (thread-count *default-thread-count*)
                    (report-function #'plotting-report-function)
-                   (report-frequency 10)
+                   (report-frequency 5)
                    plot-errors
                    weights-file)
   (let ((environment (getf *environments* environment-id)))
@@ -1586,6 +1601,7 @@ the given width and height.
                   :epochs epochs
                   :target-error target-error
                   :reset-weights reset-weights
+                  :thread-count thread-count
                   :report-frequency report-frequency
                   :report-function report-function))
   :training)
