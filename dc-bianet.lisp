@@ -1116,7 +1116,7 @@ pool, then stop it."
                                 :direction :output
                                 :if-exists :append
                                 :if-does-not-exist :create)
-      (format log-stream "t=~ds; i=~d; v=~d; p=~d; r=~fp/s; e=~d~%"
+      (format log-stream "t=~5,'0ds; i=~3,'0d; v=~6,'0d; p=~7,'0d; r=~,2fp/s; e=~,5f~%"
               elapsed-seconds iteration count presentation rate
               network-error))))
 
