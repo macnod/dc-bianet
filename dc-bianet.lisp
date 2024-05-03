@@ -813,6 +813,32 @@ problem.")))
        for cx = (value cx-node)
        collect (weight cx))))
 
+(defgeneric set-momentum (thing momentum)
+  (:documentation 
+   "Set the momentum in every connection in THING to the value of MOMENTUM
+and return the number of connections that were updated. THING can be
+an object of type T-NET, a DLIST representing a specific T-NET layer,
+or an object of type T-NEURON.")
+  (:method ((net t-net) (momentum float))
+    (loop 
+      for layer-node = (head (layer-dlist net)) then (next layer-node)
+      while layer-node
+      for layer = (value layer-node)
+      summing (set-momentum layer momentum)))
+  (:method ((layer dlist) (momentum float))
+    (loop
+      for neuron-node = (head layer) then (next neuron-node)
+      while neuron-node
+      for neuron = (value neuron-node)
+      summing (set-momentum neuron momentum)))
+  (:method ((neuron t-neuron) (momentum float))
+    (loop
+      for cx-node = (head (cx-dlist neuron)) then (next cx-node)
+      while cx-node
+      for cx = (value cx-node)
+      do (setf (momentum cx) momentum)
+      counting cx)))
+
 (defun collect-weights-into-file (thing &optional file)
   (when (and (null file) (equal (type-of thing) 't-net))
     (setf file (weights-file thing)))
@@ -1636,6 +1662,12 @@ the given width and height.
               (getf fitness :total)))
     (set-training-in-progress nil)
     (collect-weights-into-file (net environment))))
+
+(defun fitness (environment-id)
+  (let* ((environment (environment-by-id environment-id))
+         (net (net environment))
+         (test-set (test-set environment)))
+    (evaluate-inference-1hs net test-set)))
 
 (defun wait-for-training-completion (id)
   "Waits for training to complete, returns (list fitness% elapsed-seconds presentation network-error)"
