@@ -21,4 +21,5 @@
                (:file "dc-bianet")
                (:file "files")
                (:file "pngs")
-               (:file "labels")))
+               (:file "labels")
+               (:file "performance")))

@@ -207,3 +207,7 @@ OUTPUT-LIST must have the same length. The function first computes the
 index of the greatest OUTPUT-LIST value, then uses that index to
 lookup the corresponding label in LABELS-VECTOR."
   (aref labels-vector (index-of-max outputs-list)))
+
+;; (defun outputs->label (environment outputs)
+;;   (elt (index->label environment) (index-of-max outputs)))
+
