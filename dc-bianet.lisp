@@ -11,10 +11,6 @@
 
 (defparameter *magnitude-limit* 1e9)
 (defparameter *precision-limit* 1e-9)
-(defparameter *default-learning-rate* 0.02)
-(defparameter *default-momentum* 0.1)
-(defparameter *default-min-weight* -0.9)
-(defparameter *default-max-weight* 0.9)
 (defparameter *default-thread-count*
   (let ((count (cl-cpus:get-number-of-processors)))
     (cond ((< count 3) count)
@@ -109,36 +105,6 @@
   (with-mutex (*job-counter-mutex*)
     *job-counter*))
 
-(defun make-random-weight-fn (&key (min -0.5) (max 0.5))
-  (lambda (&key rstate
-             global-index
-             global-fraction
-             layer-fraction
-             neuron-fraction)
-    (declare (ignore global-index global-fraction layer-fraction
-                     neuron-fraction))
-    (+ min (random (- max min) rstate))))
-
-(defun make-progressive-weight-fn (&key (min -0.5) (max 0.5))
-  (declare (single-float min max))
-  (lambda (&key rstate
-             global-index
-             global-fraction
-             layer-fraction
-             neuron-fraction)
-    (declare (ignore rstate global-index global-fraction neuron-fraction))
-    (+ min (* layer-fraction (- max min)))))
-
-(defun make-sinusoid-weight-fn (&key (min -0.5) (max 0.5))
-  (declare (single-float min max))
-  (lambda (&key rstate
-             global-index
-             global-fraction
-             layer-fraction
-             neuron-fraction)
-    (declare (ignore rstate global-fraction layer-fraction neuron-fraction))
-    (+ (* (/ (+ (sin (coerce global-index 'single-float)) 1) 2) (- max min)) min)))
-
 (defun display-float (n)
   (read-from-string (format nil "~,4f" n)))
 
@@ -147,118 +113,10 @@
   (with-mutex (*id-mutex*)
     (incf *next-id*)))
 
-(defun logistic (x)
-  (declare (single-float x)
-           (optimize (speed 3) (safety 0)))
-  (cond ((> x (the single-float 16.64)) (the single-float 1.0))
-        ((< x (the single-float -88.7)) (the single-float 0.0))
-        ((< (the single-float (abs x)) (the single-float 1e-8)) (the single-float 0.5))
-        (t (/ (the single-float 1.0) (the single-float (1+ (the single-float (exp (- x)))))))))
-
-(defun logistic-slow (x)
-  (cond ((> x 16.64) 1.0)
-        ((< x -88.7) 0.0)
-        ((< (abs x) 1e-8) 0.5)
-        (t (/ 1 (1+ (exp (- x)))))))
-
-(defun logistic-derivative (x)
-  (declare (single-float x)
-           (optimize (speed 3) (safety 0)))
-  (* x (- (the single-float 1.0) x)))
-
-(defun relu (x)
-  (declare (single-float x)
-           (optimize (speed 3) (safety 0)))
-  (the single-float (max (the single-float 0.0) x)))
-
-(defun relu-derivative (x)
-  (declare (single-float x)
-           (optimize (speed 3) (safety 0)))
-  (if (<= x (the single-float 0.0))
-      (the single-float 0.0)
-      (the single-float 1.0)))
-
-(defun relu-leaky (x)
-  (declare (single-float x)
-           (optimize (speed 3) (safety 0)))
-  (the single-float (max (the single-float 0.0) x)))
-
-(defun relu-leaky-derivative (x)
-  (if (<= x (the single-float 0.0))
-      (the single-float 0.001)
-      (the single-float 1.0)))
-
-(defparameter *transfer-functions*
-  (list :logistic (list :function #'logistic
-                        :derivative #'logistic-derivative)
-        :relu (list :function #'relu
-                    :derivative #'relu-derivative)
-        :relu-leaky (list :function #'relu-leaky
-                          :derivative #'relu-leaky-derivative)))
-
-(defparameter *transfer-function-keys*
-  (loop for key in *transfer-functions* by #'cddr collect key))
-
-(defclass t-cx ()
-  ((id :reader id :type integer :initform (bianet-id))
-   (source :reader source :initarg :source :type t-neuron
-          :initform (error ":source required"))
-   (target :reader target :initarg :target :type t-neuron
-           :initform (error ":target required"))
-   (weight :accessor weight :initarg :weight :initform 0.1 :type single-float)
-   (weight-dlist :accessor weight-dlist :type dlist
-                 :initform (make-instance 'dlist))
-   (learning-rate :accessor learning-rate :initarg :learning-rate
-                  :type single-float :initform 0.02)
-   (momentum :accessor momentum :initarg :momentum :type single-float
-             :initform 0.1)
-   (delta :accessor delta :initarg :delta :type single-float :initform 0.0)
-   (update-count :accessor update-count :type integer :initform 0)
-   (weight-mtx :reader weight-mtx :initform (make-mutex))))
-
-(defclass t-neuron ()
-  ((id :reader id :type integer :initform (bianet-id))
-   (name :accessor name :initarg :name :type string :initform "")
-   (input :accessor input :type single-float :initform 0.0)
-   (biased :accessor biased :initarg :biased :type boolean :initform nil)
-   (transfer-key :accessor transfer-key :initarg :transfer-key
-                 :initform :logistic)
-   (transfer-function :accessor transfer-function :type function)
-   (transfer-derivative :accessor transfer-derivative :type function)
-   (output :accessor output :type single-float :initform 0.0)
-   (expected-output :accessor expected-output :type single-float :initform 0.0)
-   (err :accessor err :type single-float :initform 0.0)
-   (err-derivative :accessor err-derivative :type single-float :initform 0.0)
-   (x-coor :accessor x-coor :type single-float :initform 0.0)
-   (y-coor :accessor y-coor :type single-float :initform 0.0)
-   (z-coor :accessor z-coor :type single-float :initform 0.0)
-   (cx-dlist :accessor cx-dlist :type dlist :initform (make-instance 'dlist))
-   (input-mtx :reader input-mtx :initform (make-mutex))
-   (output-mtx :reader output-mtx :initform (make-mutex))
-   (err-mtx :reader err-mtx :initform (make-mutex))
-   (err-der-mtx :reader err-der-mtx :initform (make-mutex))))
-
-(defmethod initialize-instance :after ((neuron t-neuron) &key)
-  (when (zerop (length (name neuron)))
-    (setf (name neuron) (format nil "~d" (id neuron))))
-  (when (biased neuron)
-    (setf (input neuron) 1.0))
-  (let ((transfer (getf *transfer-functions* (transfer-key neuron))))
-    (setf (transfer-function neuron)
-          (getf transfer :function)
-          (transfer-derivative neuron)
-          (getf transfer :derivative))))
-
-(defmethod transfer ((neuron t-neuron))
-  (let* ((input (input neuron))
-         (output (funcall (transfer-function neuron) input))
-         (biased (biased neuron)))
-    (with-mutex ((output-mtx neuron))
-      (setf (output neuron) output))
-    (with-mutex ((input-mtx neuron))
-      (setf (input neuron) (if (not biased) 0.0 input)))
-    (with-mutex ((err-mtx neuron))
-      (setf (err neuron) nil))))
+(defun bianet-id-peek ()
+  "Returns the value that the next call to bianet-id will return."
+  (with-mutex (*id-mutex*)
+    *next-id*))
 
 (defclass t-net ()
   ((id :reader id :type integer :initform (bianet-id))
@@ -1358,9 +1216,9 @@ available. For a complete list of transfer functions and their
 associated keywords, see the definition of the *transfer-functions*
 parameter."
   (when (< count 1) (error "Count must be greater than or equal to 1"))
-  (when (not (member transfer-key *transfer-function-keys*))
+  (when (not (member transfer-key (plist-keys *transfer-functions*)))
     (error "Unknown transfer-key ~a. Must be one of (~{~a~^, ~})."
-           transfer-key *transfer-function-keys*))
+           transfer-key (plist-keys *transfer-functions*)))
   (loop with layer = (make-instance 'dlist)
      and n = (+ count (if add-bias 1 0))
      for a from 1 to n
