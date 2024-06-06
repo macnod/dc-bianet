@@ -1377,6 +1377,11 @@ parameter."
   (loop
      with net = (make-instance 't-net 
                                :name name 
+                               :connect-function (lambda (net)
+                                                   (connect-fully
+                                                    net
+                                                    :learning-rate learning-rate
+                                                    :momentum momentum))
                                :log-file (or log-file ""))
      for layer-spec in topology
      for layer-index = 0 then (1+ layer-index)
@@ -1576,7 +1581,7 @@ changed later."
                                     :source neuron
                                     :target target-neuron)
             do (push-tail (cx-dlist neuron) cx)
-               (incf outgoing)))
+               (incf outgoing))))
     (list :incoming incoming :outgoing outgoing)))
     
 
